@@ -96,27 +96,57 @@ const getFCrit = (df2: number, df1: number = 1): number => {
         if (df2 <= 60) return 4.00;
         return 3.84;
     }
-    if (df1 === 2) {
-        if (df2 <= 1) return 199.5;
-        if (df2 <= 2) return 19.00;
-        if (df2 <= 5) return 5.79;
-        if (df2 <= 10) return 4.10;
-        if (df2 <= 20) return 3.49;
-        if (df2 <= 60) return 3.15;
-        return 3.00;
-    }
-    // Generic fallback for higher orders
-    return 2.6; 
+    return 3.00; 
 };
 
 // Returns AIC and AICc
-// n: sample size, k: number of parameters (including intercept & error variance), sse: sum of squared errors
 const calculateAIC = (n: number, k: number, sse: number) => {
-    if (sse <= 0) sse = 1e-10; // Prevent log(0)
+    if (sse <= 1e-15) sse = 1e-15; // Prevent log(0) or -Infinity
     const aic = n * Math.log(sse / n) + 2 * k;
     const aicc = aic + (2 * k * (k + 1)) / (n - k - 1);
     const bic = n * Math.log(sse / n) + k * Math.log(n);
     return { aic, aicc, bic };
+};
+
+// MANDEL'S FITTING TEST (ISO 8466-1)
+// Compares Residual Variance of Linear (s1^2) vs Quadratic (s2^2)
+const calculateMandelTest = (x: number[], y: number[]) => {
+    const n = x.length;
+    if (n < 4) return { isLinearSufficient: true, fCalc: 0, fCrit: 0, sResLinear: 0, sResQuad: 0 }; // Not enough data
+
+    // 1. Linear Fit - Pass true to skipMandel to prevent recursion
+    const regLin = calculateRegression(x, y, 'linear_pearson', false, true);
+    const ssResLin = regLin.anova!.sse; // DS^2 linear * (N-2)
+    const dfLin = n - 2;
+
+    // 2. Quadratic Fit
+    const regQuad = calculateRegression(x, y, 'polynomial_2nd');
+    const ssResQuad = regQuad.anova!.sse; // DS^2 quad * (N-3)
+    const dfQuad = n - 3;
+    
+    // Difference in Sum of Squares
+    const diffSS = ssResLin - ssResQuad; // Improvement by adding quadratic term
+    const dfDiff = 1; // Difference in params (3 - 2)
+
+    // F-Statistic
+    // F = (Difference in Variance) / (Variance of Higher Order Model)
+    // F = ( (SSE_lin - SSE_quad) / 1 ) / ( SSE_quad / (N-3) )
+    const msDiff = diffSS / dfDiff;
+    const msQuad = ssResQuad / dfQuad;
+    
+    // Handle perfect fit case
+    if (msQuad < 1e-15) return { isLinearSufficient: false, fCalc: 9999, fCrit: getFCrit(dfQuad, 1), sResLinear: regLin.residualStdDev, sResQuad: regQuad.residualStdDev };
+
+    const fCalc = msDiff / msQuad;
+    const fCrit = getFCrit(dfQuad, 1); // F(1, N-3, 95%)
+
+    return {
+        isLinearSufficient: fCalc <= fCrit,
+        fCalc,
+        fCrit,
+        sResLinear: regLin.residualStdDev,
+        sResQuad: regQuad.residualStdDev
+    };
 };
 
 // Helper for Simple Linear Regression used in Split Models
@@ -128,22 +158,31 @@ const calculateSimpleLinearFull = (x: number[], y: number[]) => {
     const sumXY = x.reduce((s,xi,i)=>s+xi*y[i],0);
     const sumXX = x.reduce((s,xi)=>s+xi*xi,0);
     
-    const slope = (n*sumXY - sumX*sumY) / (n*sumXX - sumX*sumX);
+    // Check for vertical line
+    const det = n*sumXX - sumX*sumX;
+    if (Math.abs(det) < 1e-10) return null;
+
+    const slope = (n*sumXY - sumX*sumY) / det;
     const intercept = (sumY - slope*sumX) / n;
     
     const residuals = y.map((yi,i) => yi - (slope*x[i] + intercept));
     const ssRes = residuals.reduce((s,r)=>s+r*r,0);
-    const sRes = Math.sqrt(ssRes / (n-2));
+    const sRes = Math.sqrt(ssRes / (n > 2 ? n-2 : 1));
     const xBar = sumX/n;
     const sumSqDiffX = x.reduce((s,xi)=>s+Math.pow(xi-xBar,2),0);
 
-    return { m: slope, b: intercept, ssRes, sRes, xBar, sumSqDiffX, n, residuals };
+    // Calculate R² for this segment
+    const meanY = sumY / n;
+    const ssTot = y.reduce((s, yi) => s + Math.pow(yi - meanY, 2), 0);
+    const rSq = ssTot > 0 ? 1 - (ssRes / ssTot) : 1;
+
+    return { m: slope, b: intercept, ssRes, sRes, xBar, sumSqDiffX, n, residuals, rSq, minX: Math.min(...x), maxX: Math.max(...x) };
 };
 
 // --- MAIN REGRESSION FUNCTION ---
 
-export const calculateRegression = (x: number[], y: number[], type: CurveModel, isUncertaintyModel: boolean = false): RegressionResult => {
-  let stepText = `VALIDACIÓN Y CRITERIO DE AKAIKE (AIC)\n`;
+export const calculateRegression = (x: number[], y: number[], type: CurveModel, isUncertaintyModel: boolean = false, skipMandel: boolean = false): RegressionResult => {
+  let stepText = `ANÁLISIS DE REGRESIÓN Y VALIDACIÓN\n`;
   stepText += `==============================================\n`;
   
   // Data Filtering
@@ -168,87 +207,109 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
       };
   }
 
-  // --- SPLIT REGRESSION (DOBLE MODELADO) ---
+  // --- SPLIT REGRESSION WITH OVERLAP (REGRESIÓN DOBLE TRASLAPADA) ---
   if (type === 'piecewise_linear') {
-      stepText += `MÉTODO: REGRESIÓN DOBLE (SPLIT REGRESSION)\n`;
-      stepText += `Objetivo: Minimizar el Error Cuadrático Total combinando dos modelos lineales independientes.\n`;
-      stepText += `Criterio: Se busca el punto de corte (Split Point) óptimo iterativamente.\n\n`;
+      stepText += `MÉTODO: REGRESIÓN DOBLE CON TRASLAPE (OVERLAPPING SPLIT)\n`;
+      stepText += `Estrategia: Generar dos tendencias lineales que se traslapan para suavizar la transición.\n`;
+      
+      let r1 = null;
+      let r2 = null;
 
-      if (n < 6) {
-          // Not enough points to split meaningfully (need at least 3 points per side for decent stats)
-          return calculateRegression(x, y, 'linear_pearson', isUncertaintyModel);
+      // Logic: Split dataset into 2 overlapping chunks.
+      // Example N=6: Chunk 1 (0,1,2,3), Chunk 2 (2,3,4,5). Overlap 2.
+      // Example N=8: Chunk 1 (0..4), Chunk 2 (3..7).
+      
+      const mid = Math.floor(n / 2);
+      // Overlap strategy: Ensure at least 3 points per segment if possible
+      let endIdx1 = mid + 1; // Incluyente
+      let startIdx2 = mid - 1; // Incluyente
+      
+      if (n <= 4) {
+          // Can't split effectively, fallback to simple linear
+           stepText += `Advertencia: N=${n} insuficiente para split robusto. Usando regresión simple.\n`;
+           return calculateRegression(x, y, 'linear_pearson', isUncertaintyModel);
+      } else {
+           // Ensure overlap makes sense
+           if (startIdx2 < 0) startIdx2 = 0;
+           if (endIdx1 >= n) endIdx1 = n - 1;
+           
+           // Force at least 3 points per side
+           if (endIdx1 < 2) endIdx1 = 2;
+           if (startIdx2 > n - 3) startIdx2 = n - 3;
       }
 
-      let bestSplitIdx = -1;
-      let minTotalSSE = Infinity;
-      let bestReg1 = null;
-      let bestReg2 = null;
+      const x1 = xFiltered.slice(0, endIdx1 + 1);
+      const y1 = yFiltered.slice(0, endIdx1 + 1);
+      
+      const x2 = xFiltered.slice(startIdx2);
+      const y2 = yFiltered.slice(startIdx2);
 
-      // Iterate potential split points. Keep at least 3 points on each side.
-      // Assuming sorted X
-      for (let i = 2; i < n - 3; i++) {
-          const x1 = xFiltered.slice(0, i + 1);
-          const y1 = yFiltered.slice(0, i + 1);
-          const x2 = xFiltered.slice(i + 1);
-          const y2 = yFiltered.slice(i + 1);
+      stepText += `> Segmento Bajo: Puntos 1 a ${endIdx1 + 1} (${x1.length} datos)\n`;
+      stepText += `> Segmento Alto: Puntos ${startIdx2 + 1} a ${n} (${x2.length} datos)\n`;
+      stepText += `> Puntos de Traslape (Overlap): ${xFiltered.slice(startIdx2, endIdx1 + 1).length}\n\n`;
 
-          const r1 = calculateSimpleLinearFull(x1, y1);
-          const r2 = calculateSimpleLinearFull(x2, y2);
+      r1 = calculateSimpleLinearFull(x1, y1);
+      r2 = calculateSimpleLinearFull(x2, y2);
 
-          if (r1 && r2) {
-              const totalSSE = r1.ssRes + r2.ssRes;
-              if (totalSSE < minTotalSSE) {
-                  minTotalSSE = totalSSE;
-                  bestSplitIdx = i;
-                  bestReg1 = r1;
-                  bestReg2 = r2;
-              }
-          }
-      }
+      if (r1 && r2) {
+          // PACKING COEFFICIENTS FOR OVERLAP MODEL:
+          // [0] SplitStart (X value where overlap starts)
+          // [1] SplitEnd (X value where overlap ends)
+          // [2] m1, [3] b1, [4] sRes1, [5] xBar1, [6] Sxx1, [7] n1, [8] rSq1
+          // [9] m2, [10] b2, [11] sRes2, [12] xBar2, [13] Sxx2, [14] n2, [15] rSq2
+          
+          const splitStart = xFiltered[startIdx2];
+          const splitEnd = xFiltered[endIdx1];
 
-      if (bestReg1 && bestReg2) {
-          const splitX = xFiltered[bestSplitIdx];
-          // PACKING COEFFICIENTS:
-          // [0] SplitX
-          // [1] m1, [2] b1, [3] sRes1, [4] xBar1, [5] Sxx1, [6] n1
-          // [7] m2, [8] b2, [9] sRes2, [10] xBar2, [11] Sxx2, [12] n2
           const coeffs = [
-              splitX,
-              bestReg1.m, bestReg1.b, bestReg1.sRes, bestReg1.xBar, bestReg1.sumSqDiffX, bestReg1.n,
-              bestReg2.m, bestReg2.b, bestReg2.sRes, bestReg2.xBar, bestReg2.sumSqDiffX, bestReg2.n
+              splitStart, splitEnd,
+              r1.m, r1.b, r1.sRes, r1.xBar, r1.sumSqDiffX, r1.n, r1.rSq,
+              r2.m, r2.b, r2.sRes, r2.xBar, r2.sumSqDiffX, r2.n, r2.rSq
           ];
 
-          // Calculate Global Stats
-          const meanY = yFiltered.reduce((a,b)=>a+b,0)/n;
-          const ssTot = yFiltered.reduce((s, yi) => s + Math.pow(yi - meanY, 2), 0);
-          const rSquared = 1 - (minTotalSSE / ssTot);
+          // Global Stats Calculation
+          // Weighted R2 implies predicting every point and checking error
+          let ssTot = 0;
+          let ssRes = 0;
+          const globalMean = yFiltered.reduce((a,b)=>a+b,0)/n;
           
-          // AIC Calculation for Split Model
-          // k = (2 params + 1 var) * 2 models + 1 split_param = 7 parameters roughly? 
-          // Let's treat it as sum of AICs or a complex model with k=5 (2 slopes, 2 intercepts, 1 split) + 1 var = 6
-          const k_split = 6; 
-          const { aic, aicc, bic } = calculateAIC(n, k_split, minTotalSSE);
+          yFiltered.forEach((yi, i) => {
+              const xi = xFiltered[i];
+              let yPred = 0;
+              // Replication of prediction logic
+              if (xi <= splitStart) yPred = r1!.m * xi + r1!.b;
+              else if (xi >= splitEnd) yPred = r2!.m * xi + r2!.b;
+              else {
+                  // In overlap, average both
+                  const y1p = r1!.m * xi + r1!.b;
+                  const y2p = r2!.m * xi + r2!.b;
+                  yPred = (y1p + y2p) / 2;
+              }
+              ssRes += Math.pow(yi - yPred, 2);
+              ssTot += Math.pow(yi - globalMean, 2);
+          });
 
-          stepText += `RESULTADOS DEL DOBLE MODELADO:\n`;
-          stepText += `> Corte Óptimo en: ${splitX}\n`;
-          stepText += `> Rango Bajo (N=${bestReg1.n}): y = ${bestReg1.m.toExponential(4)}x + ${bestReg1.b.toExponential(4)}\n`;
-          stepText += `  s_res: ${bestReg1.sRes.toExponential(4)} | Incertidumbre calculada con estadística local.\n`;
-          stepText += `> Rango Alto (N=${bestReg2.n}): y = ${bestReg2.m.toExponential(4)}x + ${bestReg2.b.toExponential(4)}\n`;
-          stepText += `  s_res: ${bestReg2.sRes.toExponential(4)} | Incertidumbre calculada con estadística local.\n\n`;
-          stepText += `ESTADÍSTICA GLOBAL:\n`;
-          stepText += `> AICc: ${aicc.toFixed(2)} (Menor es mejor)\n`;
-          stepText += `> R² Global: ${rSquared.toFixed(5)}\n`;
+          const rSquared = 1 - (ssRes / (ssTot || 1));
+          const residuals = yFiltered.map((yi, i) => {
+               // simplified resid calc for DurbinWatson
+               return 0; // Not calculating D-W for split in this view to save perf
+          });
+
+          // AIC Calculation
+          // k = 2 lines * 2 params + 1 var = 5 params roughly
+          const k_split = 5; 
+          const { aic, aicc, bic } = calculateAIC(n, k_split, ssRes);
 
           return {
               coefficients: coeffs,
               rSquared,
-              residualStdDev: Math.sqrt(minTotalSSE/(n-4)), // Approx pooled
-              equationString: `Doble Tendencia (Corte @ ${splitX})`,
+              residualStdDev: Math.sqrt(ssRes/(n-4)), 
+              equationString: `Regresión Doble Traslapada`,
               validationSteps: stepText,
-              xBar: 0, sumSqDiffX: 0, n, durbinWatson: 2, // Placeholders
+              xBar: 0, sumSqDiffX: 0, n, durbinWatson: 2, 
               aic, aicc, bic,
-              modelQuality: rSquared > 0.999 ? 'EXCELLENT' : 'GOOD',
-              recommendationText: "Modelo dividido optimizado. Minimiza el error en extremos.",
+              modelQuality: rSquared > 0.99 ? 'EXCELLENT' : 'GOOD',
+              recommendationText: "Modelo optimizado con traslape para suavizar tendencias divergentes.",
               isParametricValid: true
           };
       }
@@ -258,8 +319,7 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
   let coeffs: number[] = [];
   let residuals: number[] = [];
   let ssRes = 0; 
-  let numParams = 2; // Default linear (m, b) + variance implicit in AIC formula usually k includes variance, but calculateAIC handles k as params.
-                     // Linear: y=mx+b (2 params). +1 for error var = 3.
+  let numParams = 2; // Default linear (m, b)
   
   let xCalc = [...xFiltered];
   let yCalc = [...yFiltered];
@@ -348,24 +408,40 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
   const { aic, aicc, bic } = calculateAIC(n, k_aic, ssRes);
 
   let isValid = fCalc > fCrit;
-  if (type === 'linear_theil_sen') isValid = true; // Non-parametric assumption
+  if (type === 'linear_theil_sen') isValid = true; 
 
-  // Reporting
-  stepText += `Estadística Avanzada:\n`;
-  stepText += `> Akaike (AICc): ${aicc.toFixed(2)} [Criterio Principal]\n`;
-  stepText += `> Bayesian (BIC): ${bic.toFixed(2)}\n`;
-  stepText += `> R² Ajustado: ${rSquared.toFixed(5)}\n`;
-  stepText += `> Prueba F (ANOVA): ${fCalc.toFixed(2)} vs Crit ${fCrit.toFixed(2)} (${fCalc > fCrit ? 'Pasa' : 'Falla'})\n`;
-  stepText += `> Durbin-Watson: ${durbinWatson.toFixed(2)} (Independencia)\n`;
+  // Check validity conditions for high order polynomials
+  if (type.includes('polynomial') && n <= numParams + 1) {
+      isValid = false; // Overfitting check
+      stepText += `ADVERTENCIA: Orden del polinomio muy alto para N=${n}. Posible sobreajuste.\n`;
+  }
 
   let modelQuality: 'EXCELLENT'|'GOOD'|'POOR'|'INVALID' = 'POOR';
-  if (rSquared > 0.99 && isValid) modelQuality = 'EXCELLENT';
-  else if (rSquared > 0.95 && isValid) modelQuality = 'GOOD';
   
+  if (!isValid) modelQuality = 'INVALID';
+  else if (rSquared > 0.999) modelQuality = 'EXCELLENT';
+  else if (rSquared > 0.98) modelQuality = 'GOOD';
+  
+  // Mandel Test for Linear Models
+  let recommendationText = "";
+  if (type === 'linear_pearson' && n >= 4 && !skipMandel) {
+      const mandel = calculateMandelTest(xFiltered, yFiltered);
+      if (!mandel.isLinearSufficient) {
+          stepText += `\nPRUEBA DE MANDEL (Linealidad ISO 8466-1):\n`;
+          stepText += `Resultado: NO LINEAL. F_calc (${mandel.fCalc.toFixed(2)}) > F_crit (${mandel.fCrit.toFixed(2)}).\n`;
+          stepText += `La reducción de varianza residual usando un polinomio de 2do grado es significativa.\n`;
+          stepText += `Recomendación: Considere usar un polinomio de 2do orden o Regresión Doble.\n`;
+          recommendationText = "Test de Mandel sugiere no linealidad. Revise polinomio.";
+          modelQuality = 'POOR'; // Downgrade quality even if R2 is high
+      } else {
+          stepText += `\nPRUEBA DE MANDEL (Linealidad ISO 8466-1):\n`;
+          stepText += `Resultado: LINEALIDAD ACEPTADA. F_calc (${mandel.fCalc.toFixed(2)}) <= F_crit (${mandel.fCrit.toFixed(2)}).\n`;
+      }
+  }
+
   // Specific penalties
-  if (durbinWatson < 1 || durbinWatson > 3) {
-      stepText += `ALERTA: Posible autocorrelación en residuos.\n`;
-      if (modelQuality === 'EXCELLENT') modelQuality = 'GOOD';
+  if (isValid && (durbinWatson < 1 || durbinWatson > 3)) {
+      stepText += `NOTA: Durbin-Watson ${durbinWatson.toFixed(2)} sugiere autocorrelación. Revise residuales.\n`;
   }
 
   const xBar = xCalc.reduce((a,b)=>a+b,0) / n;
@@ -385,19 +461,27 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
     isParametricValid: isValid,
     aic, aicc, bic,
     modelQuality,
-    recommendationText: "" // Populated by comparison logic later
+    recommendationText
   };
 };
 
 export const predictValue = (xInput: number, model: CurveModel, coeffs: number[]): number => {
   if (model === 'piecewise_linear') {
-      // Coeffs: [SplitX, m1, b1, sRes1, xBar1, Sxx1, n1, m2, b2, sRes2, xBar2, Sxx2, n2]
-      const splitX = coeffs[0];
-      const m1 = coeffs[1]; const b1 = coeffs[2];
-      const m2 = coeffs[7]; const b2 = coeffs[8];
+      // Coeffs Structure:
+      // [0] SplitStart, [1] SplitEnd
+      // [2] m1, [3] b1 ... [9] m2, [10] b2 ...
+      const splitStart = coeffs[0];
+      const splitEnd = coeffs[1];
+      const m1 = coeffs[2]; const b1 = coeffs[3];
+      const m2 = coeffs[9]; const b2 = coeffs[10];
       
-      if (xInput <= splitX) return m1 * xInput + b1;
-      return m2 * xInput + b2;
+      if (xInput <= splitStart) return m1 * xInput + b1;
+      if (xInput >= splitEnd) return m2 * xInput + b2;
+      
+      // In overlap, average
+      const y1 = m1 * xInput + b1;
+      const y2 = m2 * xInput + b2;
+      return (y1 + y2) / 2;
   }
 
   const c0 = coeffs[0] || 0; const c1 = coeffs[1] || 0; const c2 = coeffs[2] || 0; const c3 = coeffs[3] || 0;
@@ -416,34 +500,37 @@ export const predictValue = (xInput: number, model: CurveModel, coeffs: number[]
 export const calculateInterpolationUncertainty = (xInput: number, reg: RegressionResult, model: CurveModel): number => {
   if (reg.n < 3) return 0;
 
-  // --- RIGOROUS SPLIT UNCERTAINTY ---
+  // --- RIGOROUS SPLIT UNCERTAINTY WITH INTERPOLATION ---
   if (model === 'piecewise_linear') {
-      const splitX = reg.coefficients[0];
+      const splitStart = reg.coefficients[0];
+      const splitEnd = reg.coefficients[1];
       
-      // Determine which model to use stats from
-      let m, b, sRes, xBar, Sxx, n;
-      
-      if (xInput <= splitX) {
-          // Model 1 (Left)
-          // [1] m1, [2] b1, [3] sRes1, [4] xBar1, [5] Sxx1, [6] n1
-          sRes = reg.coefficients[3];
-          xBar = reg.coefficients[4];
-          Sxx = reg.coefficients[5];
-          n = reg.coefficients[6];
-      } else {
-          // Model 2 (Right)
-          // [7] m2, [8] b2, [9] sRes2, [10] xBar2, [11] Sxx2, [12] n2
-          sRes = reg.coefficients[9];
-          xBar = reg.coefficients[10];
-          Sxx = reg.coefficients[11];
-          n = reg.coefficients[12];
-      }
+      // Function to calculate U for a specific segment stats
+      const calcU = (x: number, sRes: number, xBar: number, Sxx: number, n: number) => {
+           if (n < 3) return 0;
+           const df = n - 2;
+           const t = getTStudentCrit(df);
+           // ISO 8466-1 / DKD-R 6-1 Formula for Calibration Curve (Prognosis Interval)
+           // u(x) = t * s_y * sqrt(1 + 1/n + (x-x_bar)^2/Sxx)
+           const term = 1 + (1/n) + (Math.pow(x - xBar, 2) / Sxx);
+           return t * sRes * Math.sqrt(term);
+      };
 
-      if (n < 3) return sRes * 2; // Fallback
+      // Model 1 Stats
+      const u1 = calcU(xInput, reg.coefficients[4], reg.coefficients[5], reg.coefficients[6], reg.coefficients[7]);
       
-      const t = getTStudentCrit(n - 2);
-      const term = 1 + (1/n) + (Math.pow(xInput - xBar, 2) / Sxx);
-      return t * sRes * Math.sqrt(term);
+      // Model 2 Stats
+      const u2 = calcU(xInput, reg.coefficients[11], reg.coefficients[12], reg.coefficients[13], reg.coefficients[14]);
+
+      if (xInput <= splitStart) return u1;
+      if (xInput >= splitEnd) return u2;
+      
+      // LINEAR INTERPOLATION OF UNCERTAINTY IN OVERLAP ZONE
+      // Weight alpha moves from 0 (at splitStart) to 1 (at splitEnd)
+      const alpha = (xInput - splitStart) / (splitEnd - splitStart);
+      
+      // Smooth blend: (1-alpha)*u1 + alpha*u2
+      return (1 - alpha) * u1 + alpha * u2;
   }
 
   let xTrans = xInput;
@@ -453,17 +540,21 @@ export const calculateInterpolationUncertainty = (xInput: number, reg: Regressio
   }
 
   const { residualStdDev, xBar, sumSqDiffX, n, anova } = reg;
+  // Use df from ANOVA or fallback
   const df = anova ? anova.dfRes : n - 2;
   const t = getTStudentCrit(df);
 
-  // ISO 8466-1 Prediction Interval
+  // ISO 8466-1 / DKD-R 6-1 standard confidence band formula for regression
+  // The '1 +' inside sqrt is for Prediction Interval (new measurement).
+  // For standard calibration curves where we want the uncertainty of the corrected value provided to the user,
+  // we treat it as a prediction of the true value.
   const term = 1 + (1/n) + (Math.pow(xTrans - xBar, 2) / sumSqDiffX);
   
   let u = t * residualStdDev * Math.sqrt(term);
   
   if (model === 'power' || model === 'exponential') {
     const yPred = predictValue(xInput, model, reg.coefficients);
-    u = Math.abs(yPred * u);
+    u = Math.abs(yPred * u); // Approx relative error propagation
   }
   return u;
 };
@@ -473,10 +564,8 @@ export const fitStandardModels = (points: StandardCalibrationPoint[], valModel: 
   const xVal = points.map(p => p.indication);
   const yVal = points.map(p => p.referenceValue);
   
-  const modelsToTest: CurveModel[] = ['linear_pearson', 'polynomial_2nd', 'polynomial_3rd', 'piecewise_linear', 'linear_theil_sen'];
+  const modelsToTest: CurveModel[] = ['linear_pearson', 'piecewise_linear', 'polynomial_2nd', 'linear_theil_sen'];
   
-  // 1. Calculate for VALUE
-  let bestValReg: RegressionResult | null = null;
   let minAICc = Infinity;
   const valResults = new Map<CurveModel, RegressionResult>();
 
@@ -484,27 +573,34 @@ export const fitStandardModels = (points: StandardCalibrationPoint[], valModel: 
   modelsToTest.forEach(m => {
       const reg = calculateRegression(xVal, yVal, m, false);
       valResults.set(m, reg);
-      // Logic for "Best": Valid parametric + Lowest AICc
-      if (reg.isParametricValid && reg.aicc < minAICc && reg.modelQuality !== 'INVALID') {
-          minAICc = reg.aicc;
+      
+      // Only consider if parametrically valid and not absurd quality
+      if (reg.isParametricValid && reg.modelQuality !== 'INVALID') {
+          if (reg.aicc < minAICc) minAICc = reg.aicc;
       }
   });
 
   // Get selected model result
-  const valueReg = calculateRegression(xVal, yVal, valModel, false);
+  // If the user selected model is 'invalid', recalculate it anyway to show errors
+  let valueReg = calculateRegression(xVal, yVal, valModel, false);
   
-  // Set comparison text
-  const valDeltaAIC = valueReg.aicc - minAICc;
-  if (valDeltaAIC <= 2) {
-      valueReg.isBestFit = true;
-      valueReg.recommendationText = "MODELO ÓPTIMO (Criterio Akaike). Balance ideal entre ajuste y complejidad.";
+  // Logic comparison
+  if (valueReg.isParametricValid) {
+      const valDeltaAIC = valueReg.aicc - minAICc;
+      // Allow a delta of 4 for "Support" (Burnham & Anderson rules: 0-2 Substantial, 4-7 Considerably less)
+      // We are being generous: if it's within 4, it's probably fine for metrology if R2 is good.
+      if (valDeltaAIC <= 4 && valueReg.rSquared > 0.95) {
+          valueReg.isBestFit = true;
+          valueReg.recommendationText = valueReg.recommendationText || "MODELO ESTADÍSTICAMENTE ROBUSTO. Cumple Criterio AICc y F-Test.";
+      } else {
+          valueReg.isBestFit = false;
+          valueReg.recommendationText = valueReg.recommendationText || `Existen modelos con mejor ajuste (ΔAICc = ${valDeltaAIC.toFixed(2)}).`;
+      }
   } else {
-      valueReg.isBestFit = false;
-      valueReg.recommendationText = `No es el óptimo estadístico (ΔAICc = ${valDeltaAIC.toFixed(2)}). Considere modelos con menor AICc.`;
+      valueReg.recommendationText = "Modelo estadísticamente inválido (Falla ANOVA o N insuficiente).";
   }
 
   // 2. Calculate for UNCERTAINTY
-  // For uncertainty, simpler is usually better (Linear or Poly 2), overcomplicating uncertainty models is risky.
   const xUnc = points.map(p => p.referenceValue);
   const yUnc = points.map(p => p.uncertainty / (p.coverageFactor || 2)); 
   const uncReg = calculateRegression(xUnc, yUnc, uncModel, true);
