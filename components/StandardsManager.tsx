@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ReferenceStandard, Unit, CurveModel, StandardCalibrationPoint, StandardType, IntermediateCheck, RegressionResult, CheckPointResult } from '../types';
 import { fitStandardModels, calculateInterpolationUncertainty, predictValue, calculateCumulativeStats } from '../services/mathUtils';
@@ -313,14 +312,14 @@ const RegressionAnalysisView = ({
             <div className="h-72 bg-white dark:bg-[#1e293b] rounded-lg border border-slate-200 dark:border-slate-700 p-2 shadow-inner relative group">
                 
                 {regression && (
-                    <div className="absolute top-8 left-16 z-20 pointer-events-none p-3 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900">
-                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">MODELO MATEMÁTICO</div>
-                        <div className="font-mono text-xs font-bold text-slate-700 dark:text-slate-200 mb-2">
-                            {regression.equationString}
-                        </div>
-                        <div className="flex items-center gap-2 text-xs border-t border-slate-100 dark:border-slate-700 pt-2">
-                             <span className="font-bold text-slate-500">R² =</span>
-                             <span className="font-mono font-bold text-brand-orange text-sm">{regression.rSquared.toFixed(5)}</span>
+                    <div className="absolute top-10 left-16 z-10 pointer-events-none">
+                        <div className="flex flex-col gap-1 text-xs">
+                             <span className="font-mono font-bold text-slate-800 dark:text-slate-100 bg-white/40 dark:bg-black/20 px-2 rounded">
+                                {regression.equationString}
+                            </span>
+                            <span className="font-mono font-bold text-brand-orange bg-white/40 dark:bg-black/20 px-2 rounded w-fit">
+                                R² = {regression.rSquared.toFixed(5)}
+                            </span>
                         </div>
                     </div>
                 )}
