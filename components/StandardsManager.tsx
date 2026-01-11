@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ReferenceStandard, Unit, CurveModel, StandardCalibrationPoint, StandardType, IntermediateCheck, RegressionResult, CheckPointResult } from '../types';
-import { fitStandardModels, calculateInterpolationUncertainty, predictValue } from '../services/mathUtils';
+import { fitStandardModels, calculateInterpolationUncertainty, predictValue, calculateCumulativeStats } from '../services/mathUtils';
 import { playSound } from '../services/calibrationLogic';
-import { Plus, X, FileText, Activity, Save, History, LineChart as ChartIcon, Settings, AlertTriangle, CheckCircle2, TrendingUp, ThumbsUp, Trophy, Calculator } from 'lucide-react';
+import { Plus, X, FileText, Activity, Save, History, LineChart as ChartIcon, Settings, AlertTriangle, CheckCircle2, Sigma, TrendingUp, ThumbsUp, ThumbsDown, Trophy, Table2, Calculator, Info, Split } from 'lucide-react';
 import { Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Scatter, ComposedChart, ReferenceLine, Legend } from 'recharts';
 
 interface Props {
@@ -313,15 +313,14 @@ const RegressionAnalysisView = ({
             <div className="h-72 bg-white dark:bg-[#1e293b] rounded-lg border border-slate-200 dark:border-slate-700 p-2 shadow-inner relative group">
                 
                 {regression && (
-                    <div className="absolute top-10 left-16 z-10 pointer-events-none">
-                        <div className="flex flex-col gap-1 p-2 rounded bg-white/60 dark:bg-slate-900/60 backdrop-blur-[2px]">
-                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Modelo Matemático</span>
-                            <span className="font-mono text-xs font-bold text-slate-800 dark:text-slate-100">
-                                {regression.equationString}
-                            </span>
-                            <span className="font-mono text-xs font-bold text-brand-orange">
-                                R² = {regression.rSquared.toFixed(5)}
-                            </span>
+                    <div className="absolute top-8 left-16 z-20 pointer-events-none p-3 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-900">
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">MODELO MATEMÁTICO</div>
+                        <div className="font-mono text-xs font-bold text-slate-700 dark:text-slate-200 mb-2">
+                            {regression.equationString}
+                        </div>
+                        <div className="flex items-center gap-2 text-xs border-t border-slate-100 dark:border-slate-700 pt-2">
+                             <span className="font-bold text-slate-500">R² =</span>
+                             <span className="font-mono font-bold text-brand-orange text-sm">{regression.rSquared.toFixed(5)}</span>
                         </div>
                     </div>
                 )}
@@ -615,6 +614,28 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
           .sci-input-sm { width: 100%; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; padding: 0.4rem; font-size: 0.85rem; border-radius: 0.3rem; } .dark .sci-input-sm { background: #0f172a; border-color: #334155; color: #e2e8f0; }
           .label-xs { font-size: 0.7rem; text-transform: uppercase; font-weight: 700; color: #64748b; margin-bottom: 4px; display: block; } .dark .label-xs { color: #94a3b8; }
         `}</style>
+      </div>
+    ) : (
+      <div className="p-8 max-w-[1600px] mx-auto min-h-screen">
+          <div className="flex justify-between items-center mb-8">
+              <h2 className="text-3xl font-display font-bold text-brand-dark dark:text-white">LISTADO DE PATRONES</h2>
+              <button onClick={handleCreate} className="px-6 py-3 bg-brand-blue text-white rounded-xl shadow-lg hover:bg-sky-700 font-bold flex items-center gap-2"><Plus size={20} /> NUEVO PATRÓN</button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {standards.map(std => (
+                  <div key={std.id} className="glass-panel p-6 rounded-2xl border border-slate-200 dark:border-slate-700 hover:shadow-xl transition-all group relative overflow-hidden">
+                      <div className="absolute top-0 left-0 w-2 h-full bg-emerald-500"></div>
+                      <div className="pl-4">
+                          <h3 className="font-bold text-lg text-slate-800 dark:text-white">{std.name}</h3>
+                          <p className="text-xs font-mono text-slate-500">{std.serialNumber}</p>
+                          <div className="mt-4 flex gap-2">
+                              <button onClick={() => handleEdit(std)} className="bg-slate-100 dark:bg-slate-800 px-3 py-1 rounded text-xs font-bold">Editar</button>
+                              <button onClick={() => deleteStd(std.id)} className="bg-red-50 dark:bg-red-900/20 text-red-500 px-3 py-1 rounded text-xs font-bold">Eliminar</button>
+                          </div>
+                      </div>
+                  </div>
+              ))}
+          </div>
       </div>
     );
 };
