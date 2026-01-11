@@ -58,74 +58,8 @@
         }
       };
     </script>
-    <style>
-      body {
-        background-color: #f0f9ff;
-        color: #1e293b;
-        overflow-x: hidden;
-      }
-      .dark body {
-        background-color: #020617; /* Deep Slate 950 - High Contrast Base */
-        color: #e2e8f0; /* Slate 200 - High Legibility Text */
-      }
-      /* Animated Background */
-      .animated-bg {
-        background: linear-gradient(-45deg, #f0f9ff, #e0f2fe, #fff7ed, #ecfeff);
-        background-size: 400% 400%;
-        animation: gradient-x 15s ease infinite;
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        z-index: -1;
-      }
-      .dark .animated-bg {
-         background: #020617; /* Solid dark background for cleanliness */
-         background-image: radial-gradient(circle at center, #1e293b 0%, #020617 100%);
-         opacity: 1;
-      }
-      
-      /* Glassmorphism Utilities */
-      .glass-panel {
-        background: rgba(255, 255, 255, 0.85); /* Whiter for better contrast */
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1px solid rgba(255, 255, 255, 0.8);
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
-      }
-      
-      .dark .glass-panel {
-        background: rgba(15, 23, 42, 0.7); /* Slate 900 semi-transparent */
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(51, 65, 85, 0.5); /* Clearer borders */
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
-      }
-      
-      /* Custom Scrollbar */
-      ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-      }
-      ::-webkit-scrollbar-track {
-        background: #f1f5f9; 
-      }
-      .dark ::-webkit-scrollbar-track {
-        background: #020617;
-      }
-      ::-webkit-scrollbar-thumb {
-        background: #cbd5e1; 
-        border-radius: 4px;
-      }
-      .dark ::-webkit-scrollbar-thumb {
-        background: #334155;
-      }
-      ::-webkit-scrollbar-thumb:hover {
-        background: #94a3b8; 
-      }
-    </style>
-    <script type="importmap">
+    <link rel="stylesheet" href="/index.css">
+<script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@^19.2.3",
@@ -133,17 +67,15 @@
     "react/": "https://esm.sh/react@^19.2.3/",
     "lucide-react": "https://esm.sh/lucide-react@^0.562.0",
     "recharts": "https://esm.sh/recharts@^3.6.0",
+    "path": "https://esm.sh/path@^0.12.7",
     "vite": "https://esm.sh/vite@^7.3.1",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2",
-    "path": "https://esm.sh/path@^0.12.7"
+    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
   }
 }
 </script>
-  <link rel="stylesheet" href="/index.css">
 </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="./index.tsx"></script>
-  <script type="module" src="/index.tsx"></script>
+    <script type="module" src="/index.tsx"></script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { ReferenceStandard, Unit, CurveModel, StandardCalibrationPoint, StandardType, IntermediateCheck, RegressionResult, CheckPointResult } from '../types';
-import { fitStandardModels, calculateInterpolationUncertainty, predictValue, calculateCumulativeStats } from '../services/mathUtils';
+import { fitStandardModels, calculateInterpolationUncertainty, predictValue } from '../services/mathUtils';
 import { playSound } from '../services/calibrationLogic';
-import { Plus, X, FileText, Activity, Save, History, LineChart as ChartIcon, Settings, AlertTriangle, CheckCircle2, Sigma, TrendingUp, ThumbsUp, ThumbsDown, Trophy, Table2, Calculator } from 'lucide-react';
+import { Plus, X, FileText, Activity, Save, History, LineChart as ChartIcon, Settings, AlertTriangle, CheckCircle2, TrendingUp, ThumbsUp, Trophy, Calculator } from 'lucide-react';
 import { Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Scatter, ComposedChart, ReferenceLine, Legend } from 'recharts';
 
 interface Props {
@@ -25,7 +25,9 @@ const EmptyStandard: ReferenceStandard = {
   unit: Unit.Bar,
   resolution: 0.01,
   valueModelType: 'linear_pearson',
+  valueSubModels: { low: 'linear_pearson', high: 'linear_pearson' },
   uncertaintyModelType: 'linear_pearson',
+  uncertaintySubModels: { low: 'linear_pearson', high: 'linear_pearson' },
   calibrationPoints: []
 };
 
@@ -72,34 +74,12 @@ const Card: React.FC<{title: string, icon: any, children: React.ReactNode}> = ({
 const CoefficientTable = ({ regression, modelType }: { regression: RegressionResult, modelType: CurveModel }) => {
     if (!regression) return null;
 
-    if (modelType === 'piecewise_linear') {
-        // [0]SplitStart [1]SplitEnd [2]m1 [3]b1 ... [9]m2 [10]b2 ...
-        const c = regression.coefficients;
+    if (modelType === 'piecewise_mixed') {
         return (
              <div className="w-full text-xs overflow-hidden rounded border border-slate-200 dark:border-slate-700 mt-2">
-                <table className="w-full text-left">
-                    <thead className="bg-slate-100 dark:bg-slate-800 font-bold text-slate-500">
-                        <tr><th className="p-2">Tramo</th><th className="p-2">Pendiente (m)</th><th className="p-2">Intercepto (b)</th><th className="p-2">R²</th><th className="p-2">S.Resid</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
-                        <tr>
-                            <td className="p-2 font-bold text-brand-blue">Bajo ({'<'}{c[1]})</td>
-                            <td className="p-2 font-mono">{c[2]?.toExponential(4)}</td>
-                            <td className="p-2 font-mono">{c[3]?.toExponential(4)}</td>
-                            <td className="p-2 font-mono">{c[8]?.toFixed(4)}</td>
-                            <td className="p-2 font-mono">{c[4]?.toExponential(2)}</td>
-                        </tr>
-                        <tr>
-                            <td className="p-2 font-bold text-brand-orange">Alto ({'>'}{c[0]})</td>
-                            <td className="p-2 font-mono">{c[9]?.toExponential(4)}</td>
-                            <td className="p-2 font-mono">{c[10]?.toExponential(4)}</td>
-                            <td className="p-2 font-mono">{c[15]?.toFixed(4)}</td>
-                            <td className="p-2 font-mono">{c[11]?.toExponential(2)}</td>
-                        </tr>
-                    </tbody>
-                </table>
-                <div className="bg-slate-50 dark:bg-slate-900 p-2 text-[10px] text-slate-500 text-center italic">
-                    Zona de traslape: {c[0]} a {c[1]}. Incertidumbre interpolada linealmente en esta zona.
+                <div className="bg-slate-100 dark:bg-slate-800 p-2 font-bold text-slate-500 text-center">Coeficientes Regresión Doble</div>
+                <div className="p-3 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 italic text-center">
+                    Los coeficientes se calculan independientemente para cada tramo. Consulte los detalles del modelo compuesto.
                 </div>
             </div>
         );
@@ -130,45 +110,86 @@ const CoefficientTable = ({ regression, modelType }: { regression: RegressionRes
 };
 
 const ValidationCard = ({ regression }: { regression?: RegressionResult }) => {
-    if (!regression) return null;
+    if (!regression || !regression.extendedValidation) return null;
     
-    // Check if Mandel test info is in validation steps
-    const hasMandelFail = regression.validationSteps.includes("Test de Mandel sugiere no linealidad");
-    const hasMandelPass = regression.validationSteps.includes("LINEALIDAD ACEPTADA");
-    const fTestPass = regression.isParametricValid;
+    const v = regression.extendedValidation;
+    
+    const ValidationRow = ({ result, step }: { result: any, step: number }) => (
+        <div className="flex items-center justify-between p-2 border-b border-slate-100 dark:border-slate-700 last:border-0 hover:bg-slate-100 dark:hover:bg-slate-800/50 rounded transition-colors group">
+            <div className="flex items-center gap-3">
+                <span className="w-5 h-5 flex items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-[10px] font-bold text-slate-500">{step}</span>
+                <div>
+                    <div className="text-xs font-bold text-slate-700 dark:text-slate-200">{result.label}</div>
+                    <div className="text-[10px] text-slate-400 hidden group-hover:block">{result.details}</div>
+                </div>
+            </div>
+            <div className="text-right">
+                {result.isNotApplicable ? (
+                    <span className="text-[10px] text-slate-400 font-bold bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">N/A</span>
+                ) : (
+                    <>
+                        <div className={`flex items-center justify-end gap-1 font-bold text-xs ${result.passed ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}`}>
+                            {result.passed ? 'CUMPLE' : 'NO CUMPLE'}
+                            {result.passed ? <CheckCircle2 size={14}/> : <AlertTriangle size={14}/>}
+                        </div>
+                        <div className="text-[9px] font-mono text-slate-400">
+                            {result.statisticName}={result.statisticValue} (Crit: {result.criticalValue.toFixed(2)})
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>
+    );
 
     return (
-        <div className="mt-4 bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border border-slate-200 dark:border-slate-700">
-            <h4 className="text-xs font-bold text-slate-500 uppercase flex items-center gap-2 mb-3">
-                <Calculator size={14}/> Validación Estadística
+        <div className="mt-4 bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+            <h4 className="text-xs font-bold text-brand-blue uppercase flex items-center gap-2 mb-3 pb-2 border-b border-slate-200 dark:border-slate-700">
+                <Calculator size={14}/> Validación Estadística (ILAC P14)
             </h4>
-            <div className="grid grid-cols-2 gap-4">
-                <div className={`p-3 rounded border ${fTestPass ? 'bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-300' : 'bg-red-50 border-red-200 text-red-800 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300'}`}>
-                    <div className="text-[10px] font-bold uppercase mb-1">Significancia del Modelo (F-Test)</div>
-                    <div className="flex items-center gap-2">
-                        {fTestPass ? <CheckCircle2 size={16}/> : <AlertTriangle size={16}/>}
-                        <span className="text-sm font-bold">{fTestPass ? 'SIGNIFICATIVO' : 'NO SIGNIFICATIVO'}</span>
-                    </div>
+            <div className="flex flex-col gap-1">
+                <ValidationRow step={1} result={v.correlation} />
+                <div className="grid grid-cols-2 gap-2">
+                    <ValidationRow step={2} result={v.normalityX} />
+                    <ValidationRow step={2} result={v.normalityY} />
                 </div>
-
-                <div className={`p-3 rounded border ${hasMandelFail ? 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-900/20 dark:border-amber-800 dark:text-amber-300' : hasMandelPass ? 'bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-900/20 dark:border-emerald-800 dark:text-emerald-300' : 'bg-slate-100 border-slate-200 text-slate-500 dark:bg-slate-800 dark:border-slate-600'}`}>
-                    <div className="text-[10px] font-bold uppercase mb-1">Linealidad (Test de Mandel)</div>
-                    <div className="flex items-center gap-2">
-                        {hasMandelFail ? <AlertTriangle size={16}/> : hasMandelPass ? <CheckCircle2 size={16}/> : <div className="w-4"/>}
-                        <span className="text-sm font-bold">
-                            {hasMandelFail ? 'NO LINEAL' : hasMandelPass ? 'LINEALIDAD ACEPTADA' : 'N/A'}
-                        </span>
+                <ValidationRow step={3} result={v.modelSignificance} />
+                <ValidationRow step={4} result={v.independence} />
+                <ValidationRow step={5} result={v.normalityResiduals} />
+                
+                {v.mandelLinearity && (
+                    <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-700">
+                        <ValidationRow step={6} result={v.mandelLinearity} />
                     </div>
-                </div>
+                )}
             </div>
         </div>
     );
 };
 
+const ModelSelect = ({ value, onChange, label, className }: any) => (
+    <div className={className}>
+        <label className="label-xs mb-1 block text-slate-500">{label}</label>
+        <select 
+            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 rounded-lg p-2 font-bold outline-none focus:ring-2 focus:ring-brand-blue text-xs" 
+            value={value} 
+            onChange={onChange}
+        >
+            <option value="linear_pearson">Lineal (Pearson)</option>
+            <option value="linear_theil_sen">Lineal Robusta (Theil-Sen)</option>
+            <option value="polynomial_2nd">Polinomio Grado 2</option>
+            <option value="polynomial_3rd">Polinomio Grado 3</option>
+            <option value="power">Potencial</option>
+            <option value="exponential">Exponencial</option>
+            <option value="logarithmic">Logarítmico</option>
+        </select>
+    </div>
+);
+
 const RegressionAnalysisView = ({ 
-    label, subLabel, modelType, setModelType, regression, dataPoints, color, isUncertainty = false
+    label, subLabel, modelType, setModelType, subModels, setSubModels, regression, dataPoints, color, isUncertainty = false
 }: { 
     label: string, subLabel: string, modelType: CurveModel, setModelType: (m: CurveModel) => void, 
+    subModels?: { low: CurveModel, high: CurveModel }, setSubModels?: (sm: { low: CurveModel, high: CurveModel }) => void,
     regression?: RegressionResult, dataPoints: { x: number, y: number }[], color: string, isUncertainty?: boolean
 }) => {
     
@@ -179,19 +200,16 @@ const RegressionAnalysisView = ({
         const minX = isUncertainty ? 0 : Math.min(...xValues);
         const maxX = Math.max(...xValues);
         const range = maxX - minX || 1;
-        const step = range / 100; // Smoother curve
+        const step = range / 100; 
         
         const points = [];
         for (let x = minX; x <= maxX + step; x += step) {
-            let yPred = predictValue(x, modelType, regression.coefficients);
-            
-            // Calculate band width for uncertainty
+            // Need to pass subModels for piecewise prediction
+            let yPred = predictValue(x, modelType, regression.coefficients, regression.subModels);
             let u = 0;
-            // Only calc uncertainty band for Value Correction model, or if it is the uncertainty model itself (prediction)
             if (!isUncertainty) {
                  u = calculateInterpolationUncertainty(x, regression, modelType);
             }
-            
             if (isUncertainty && yPred < 0) yPred = 0; 
             
             points.push({ x, yPred, upper: yPred + u, lower: yPred - u });
@@ -199,7 +217,6 @@ const RegressionAnalysisView = ({
         return points;
     }, [regression, modelType, dataPoints, isUncertainty]);
 
-    // Quality Badge Logic
     const qualityColor = regression?.isBestFit ? 'bg-indigo-600 shadow-indigo-500/50' : 
                          regression?.modelQuality === 'EXCELLENT' ? 'bg-emerald-500' : 
                          regression?.modelQuality === 'GOOD' ? 'bg-blue-500' : 'bg-red-500';
@@ -211,14 +228,14 @@ const RegressionAnalysisView = ({
                     <div className="flex-1 w-full flex flex-col gap-2">
                         <label className="label-xs block">{label}</label>
                         <p className="text-[10px] text-slate-400 font-mono mb-2">{subLabel}</p>
-                        <div className="relative">
+                        <div className="relative mb-2">
                             <select 
                                 className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-800 dark:text-slate-200 rounded-lg p-2 font-bold outline-none focus:ring-2 focus:ring-brand-blue transition-all" 
                                 value={modelType} 
                                 onChange={e => setModelType(e.target.value as CurveModel)}
                             >
                                 <option value="linear_pearson">Lineal (Pearson)</option>
-                                <option value="piecewise_linear" className="font-bold text-indigo-600">★ Regresión Doble (Overlap)</option>
+                                <option value="piecewise_mixed" className="font-bold text-indigo-600">★ Regresión Doble Flexible (Mix)</option>
                                 <option value="linear_theil_sen">Lineal Robusta (Theil-Sen)</option>
                                 <option value="polynomial_2nd">Polinomio Grado 2</option>
                                 <option value="polynomial_3rd">Polinomio Grado 3</option>
@@ -227,15 +244,24 @@ const RegressionAnalysisView = ({
                                 <option value="logarithmic">Logarítmico</option>
                             </select>
                         </div>
-                        {regression && (
-                            <div className="mt-2 text-xs font-mono bg-slate-100 dark:bg-slate-800 p-2 rounded border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300">
-                                {regression.equationString}
+
+                        {modelType === 'piecewise_mixed' && subModels && setSubModels && (
+                            <div className="bg-indigo-50 dark:bg-indigo-900/20 p-2 rounded border border-indigo-100 dark:border-indigo-800 mb-2 grid grid-cols-2 gap-2 animate-appear">
+                                <ModelSelect 
+                                    label="Tramo Bajo" 
+                                    value={subModels.low} 
+                                    onChange={(e: any) => setSubModels({...subModels, low: e.target.value})} 
+                                />
+                                <ModelSelect 
+                                    label="Tramo Alto" 
+                                    value={subModels.high} 
+                                    onChange={(e: any) => setSubModels({...subModels, high: e.target.value})} 
+                                />
                             </div>
                         )}
                     </div>
                     
                     <div className="flex-[2] w-full bg-slate-50 dark:bg-[#1e293b] p-3 rounded-lg border border-slate-200 dark:border-slate-700 flex flex-col justify-center relative overflow-hidden">
-                        {/* Quality Badge */}
                         <div className={`absolute top-0 right-0 px-3 py-1 text-[10px] font-bold text-white rounded-bl-lg shadow-lg flex items-center gap-1 ${qualityColor}`}>
                             {regression?.isBestFit && <Trophy size={10} />}
                             {regression?.isBestFit ? 'MEJOR OPCIÓN' : regression?.modelQuality}
@@ -266,7 +292,7 @@ const RegressionAnalysisView = ({
                             <div className="flex items-center gap-1">
                                 <span className="text-slate-400">Prueba F:</span>
                                 <strong className={regression?.isParametricValid ? "text-emerald-500" : "text-red-500"}>
-                                    {regression?.anova?.fStatistic.toFixed(2)}
+                                    {regression?.anova?.fStatistic ? regression.anova.fStatistic.toFixed(2) : 'N/A'}
                                 </strong>
                             </div>
                         </div>
@@ -280,27 +306,26 @@ const RegressionAnalysisView = ({
                     </div>
                 </div>
 
-                {/* FULL COEFFICIENT TABLE */}
                 {regression && <CoefficientTable regression={regression} modelType={modelType} />}
-                
-                {/* STATISTICAL VALIDATION CARD */}
                 {regression && <ValidationCard regression={regression} />}
             </div>
 
-            {regression?.validationSteps && (
-                 <div className="w-full bg-slate-100 dark:bg-slate-800 p-3 rounded border border-slate-200 dark:border-slate-600">
-                    <details>
-                        <summary className="text-[10px] uppercase text-slate-500 font-bold cursor-pointer hover:text-brand-blue select-none">
-                            Ver Análisis Estadístico Detallado & Validación
-                        </summary>
-                        <pre className="mt-2 text-[10px] font-mono text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed overflow-x-auto">
-                            {regression.validationSteps}
-                        </pre>
-                    </details>
-                 </div>
-            )}
+            <div className="h-72 bg-white dark:bg-[#1e293b] rounded-lg border border-slate-200 dark:border-slate-700 p-2 shadow-inner relative group">
+                
+                {regression && (
+                    <div className="absolute top-10 left-16 z-10 pointer-events-none">
+                        <div className="flex flex-col gap-1 p-2 rounded bg-white/60 dark:bg-slate-900/60 backdrop-blur-[2px]">
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mb-1">Modelo Matemático</span>
+                            <span className="font-mono text-xs font-bold text-slate-800 dark:text-slate-100">
+                                {regression.equationString}
+                            </span>
+                            <span className="font-mono text-xs font-bold text-brand-orange">
+                                R² = {regression.rSquared.toFixed(5)}
+                            </span>
+                        </div>
+                    </div>
+                )}
 
-            <div className="h-72 bg-white dark:bg-[#1e293b] rounded-lg border border-slate-200 dark:border-slate-700 p-2 shadow-inner relative">
                 <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart data={simulationData}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#475569" strokeOpacity={0.1} />
@@ -309,11 +334,9 @@ const RegressionAnalysisView = ({
                         <Tooltip contentStyle={{backgroundColor: 'rgba(15, 23, 42, 0.95)', border: '1px solid #334155', color: '#fff', fontSize: '12px', borderRadius: '8px'}} />
                         <Legend verticalAlign="top" height={36} iconType="circle" />
                         
-                        {/* Reference Line for Split Point if Piecewise */}
-                        {modelType === 'piecewise_linear' && regression && (
+                        {modelType === 'piecewise_mixed' && regression?.subModels && (
                             <>
-                                <ReferenceLine x={regression.coefficients[0]} stroke="#6366f1" strokeDasharray="2 2" />
-                                <ReferenceLine x={regression.coefficients[1]} stroke="#6366f1" strokeDasharray="2 2" />
+                                <ReferenceLine x={regression.subModels.low.limit} stroke="#6366f1" strokeDasharray="2 2" label={{value: 'Split', fill: '#6366f1', fontSize: 10}} />
                             </>
                         )}
 
@@ -341,19 +364,26 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
   const [spcDate, setSpcDate] = useState(new Date().toISOString().split('T')[0]);
   const [spcTech, setSpcTech] = useState('Admin');
   
-  // Recalculate regression when editing or points change
   useEffect(() => {
     if (isEditing && currentStd.calibrationPoints.length >= 3) {
-      const { valueReg, uncReg } = fitStandardModels(currentStd.calibrationPoints, currentStd.valueModelType, currentStd.uncertaintyModelType);
+      const { valueReg, uncReg } = fitStandardModels(
+          currentStd.calibrationPoints, 
+          currentStd.valueModelType, 
+          currentStd.uncertaintyModelType,
+          currentStd.valueSubModels,
+          currentStd.uncertaintySubModels
+      );
       
-      // Update state only if equations changed to prevent infinite loops, but using a JSON stringify compare for safety on deep objects
-      if(JSON.stringify(valueReg.coefficients) !== JSON.stringify(currentStd.valueRegression?.coefficients) || 
-         JSON.stringify(uncReg.coefficients) !== JSON.stringify(currentStd.uncertaintyRegression?.coefficients) ||
-         valueReg.modelQuality !== currentStd.valueRegression?.modelQuality) {
+      const valStr = JSON.stringify(valueReg.coefficients) + valueReg.equationString;
+      const uncStr = JSON.stringify(uncReg.coefficients) + uncReg.equationString;
+      const currValStr = JSON.stringify(currentStd.valueRegression?.coefficients) + currentStd.valueRegression?.equationString;
+      const currUncStr = JSON.stringify(currentStd.uncertaintyRegression?.coefficients) + currentStd.uncertaintyRegression?.equationString;
+
+      if(valStr !== currValStr || uncStr !== currUncStr) {
           setCurrentStd(prev => ({ ...prev, valueRegression: valueReg, uncertaintyRegression: uncReg }));
       }
     }
-  }, [currentStd.calibrationPoints, currentStd.valueModelType, currentStd.uncertaintyModelType, isEditing]);
+  }, [currentStd.calibrationPoints, currentStd.valueModelType, currentStd.uncertaintyModelType, currentStd.valueSubModels, currentStd.uncertaintySubModels, isEditing]);
 
   const handleSave = () => {
     playSound('success');
@@ -382,7 +412,6 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
       setNewPoint({ coverageFactor: 2, confidenceLevel: 95.45, distribution: 'Normal' });
   };
 
-  // SPC helpers
   const initializeSPC = () => {
      const mid = (currentStd.rangeMax - currentStd.rangeMin)/2;
      const points = [currentStd.rangeMin, mid, currentStd.rangeMax];
@@ -433,11 +462,9 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
       return { trendData: trends, rawScatterData: raws };
   }, [currentStd.intermediateChecks, selectedSPCPoint, currentStd.checkConfig]);
 
-  // Data for charts
   const valuePoints = currentStd.calibrationPoints.map(p => ({ x: p.indication, y: p.referenceValue }));
   const uncertaintyPoints = currentStd.calibrationPoints.map(p => ({ x: p.referenceValue, y: p.uncertainty }));
 
-  // --- RENDER ---
   const handleCreate = () => { setCurrentStd({ ...EmptyStandard, id: Date.now().toString() }); setIsEditing(true); setActiveSubTab('info'); };
   const handleEdit = (std: ReferenceStandard) => { setCurrentStd({ ...std }); setIsEditing(true); setActiveSubTab('info'); };
   const deleteStd = (id: string) => { if (confirm('¿Eliminar?')) setStandards(s => s.filter(x => x.id !== id)); };
@@ -501,9 +528,30 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
                     <button onClick={() => setAnalysisTab('uncertainty')} className={`px-4 py-2 text-sm font-bold uppercase border-b-2 transition-colors ${analysisTab === 'uncertainty' ? 'border-brand-blue text-brand-blue' : 'border-transparent text-slate-400'}`}>Incertidumbre</button>
                 </div>
                 {analysisTab === 'value' ? (
-                    <RegressionAnalysisView label="Modelo de Corrección" subLabel="Ajuste de Lecturas vs Referencia" modelType={currentStd.valueModelType} setModelType={(m) => setCurrentStd({...currentStd, valueModelType: m})} regression={currentStd.valueRegression} dataPoints={valuePoints} color="#f97316"/>
+                    <RegressionAnalysisView 
+                        label="Modelo de Corrección" 
+                        subLabel="Ajuste de Lecturas vs Referencia" 
+                        modelType={currentStd.valueModelType} 
+                        setModelType={(m) => setCurrentStd({...currentStd, valueModelType: m})} 
+                        subModels={currentStd.valueSubModels}
+                        setSubModels={(sm) => setCurrentStd({...currentStd, valueSubModels: sm})}
+                        regression={currentStd.valueRegression} 
+                        dataPoints={valuePoints} 
+                        color="#f97316"
+                    />
                 ) : (
-                    <RegressionAnalysisView label="Modelo de Incertidumbre" subLabel="Ajuste de Incertidumbre vs Referencia" modelType={currentStd.uncertaintyModelType} setModelType={(m) => setCurrentStd({...currentStd, uncertaintyModelType: m})} regression={currentStd.uncertaintyRegression} dataPoints={uncertaintyPoints} color="#0ea5e9" isUncertainty={true} />
+                    <RegressionAnalysisView 
+                        label="Modelo de Incertidumbre" 
+                        subLabel="Ajuste de Incertidumbre vs Referencia" 
+                        modelType={currentStd.uncertaintyModelType} 
+                        setModelType={(m) => setCurrentStd({...currentStd, uncertaintyModelType: m})} 
+                        subModels={currentStd.uncertaintySubModels}
+                        setSubModels={(sm) => setCurrentStd({...currentStd, uncertaintySubModels: sm})}
+                        regression={currentStd.uncertaintyRegression} 
+                        dataPoints={uncertaintyPoints} 
+                        color="#0ea5e9" 
+                        isUncertainty={true} 
+                    />
                 )}
              </Card>
           </div>
@@ -567,28 +615,6 @@ export const StandardsManager: React.FC<Props> = ({ standards, setStandards }) =
           .sci-input-sm { width: 100%; background: #fff; color: #1e293b; border: 1px solid #cbd5e1; padding: 0.4rem; font-size: 0.85rem; border-radius: 0.3rem; } .dark .sci-input-sm { background: #0f172a; border-color: #334155; color: #e2e8f0; }
           .label-xs { font-size: 0.7rem; text-transform: uppercase; font-weight: 700; color: #64748b; margin-bottom: 4px; display: block; } .dark .label-xs { color: #94a3b8; }
         `}</style>
-      </div>
-    ) : (
-      <div className="p-8 max-w-[1600px] mx-auto min-h-screen">
-          <div className="flex justify-between items-center mb-8">
-              <h2 className="text-3xl font-display font-bold text-brand-dark dark:text-white">LISTADO DE PATRONES</h2>
-              <button onClick={handleCreate} className="px-6 py-3 bg-brand-blue text-white rounded-xl shadow-lg hover:bg-sky-700 font-bold flex items-center gap-2"><Plus size={20} /> NUEVO PATRÓN</button>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {standards.map(std => (
-                  <div key={std.id} className="glass-panel p-6 rounded-2xl border border-slate-200 dark:border-slate-700 hover:shadow-xl transition-all group relative overflow-hidden">
-                      <div className="absolute top-0 left-0 w-2 h-full bg-emerald-500"></div>
-                      <div className="pl-4">
-                          <h3 className="font-bold text-lg text-slate-800 dark:text-white">{std.name}</h3>
-                          <p className="text-xs font-mono text-slate-500">{std.serialNumber}</p>
-                          <div className="mt-4 flex gap-2">
-                              <button onClick={() => handleEdit(std)} className="bg-slate-100 dark:bg-slate-800 px-3 py-1 rounded text-xs font-bold">Editar</button>
-                              <button onClick={() => deleteStd(std.id)} className="bg-red-50 dark:bg-red-900/20 text-red-500 px-3 py-1 rounded text-xs font-bold">Eliminar</button>
-                          </div>
-                      </div>
-                  </div>
-              ))}
-          </div>
       </div>
     );
 };

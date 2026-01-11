@@ -40,7 +40,7 @@ export enum CalibrationFluid {
 export type CurveModel = 
   | 'linear_pearson'    
   | 'linear_theil_sen'  
-  | 'piecewise_linear' // Regresión Doble (Split)
+  | 'piecewise_mixed'   // Regresión Doble Flexible (Cualquier combinación)
   | 'polynomial_2nd' 
   | 'polynomial_3rd' 
   | 'power'             
@@ -99,12 +99,35 @@ export interface AnovaResult {
   recommendation?: string;
 }
 
+export interface ValidationStepResult {
+    passed: boolean;
+    label: string;
+    statisticName: string;
+    statisticValue: number;
+    criticalValue: number;
+    details: string;
+    isNotApplicable?: boolean;
+}
+
+export interface RegressionValidation {
+    correlation: ValidationStepResult;      // Parametric: Pearson t-test | Non-Parametric: Spearman
+    normalityX: ValidationStepResult;       // Only Parametric
+    normalityY: ValidationStepResult;       // Only Parametric
+    modelSignificance: ValidationStepResult;// Parametric: ANOVA F | Non-Parametric: N/A
+    independence: ValidationStepResult;     // Parametric: t-test on residuals
+    normalityResiduals: ValidationStepResult; // Only Parametric
+    mandelLinearity?: ValidationStepResult; // Only Linear Parametric
+}
+
 export interface RegressionResult {
   coefficients: number[]; 
   rSquared: number;
   residualStdDev: number; 
   equationString: string;
-  validationSteps: string;
+  validationSteps: string; 
+  
+  extendedValidation?: RegressionValidation;
+
   xBar: number; 
   sumSqDiffX: number; 
   n: number;
@@ -112,15 +135,19 @@ export interface RegressionResult {
   anova?: AnovaResult;
   isParametricValid?: boolean;
   
-  // Statistical Criteria
-  aic: number;  // Akaike Information Criterion
-  aicc: number; // Corrected AIC for small sample sizes
-  bic: number;  // Bayesian Information Criterion
+  aic: number;  
+  aicc: number; 
+  bic: number;  
 
-  // Recommendation Engine
   modelQuality: 'EXCELLENT' | 'GOOD' | 'POOR' | 'INVALID';
   recommendationText: string;
   isBestFit?: boolean;
+  
+  // For Piecewise Mixed - Stores the result of sub-regressions
+  subModels?: {
+      low: { type: CurveModel, coeffs: number[], limit: number };
+      high: { type: CurveModel, coeffs: number[], limit: number };
+  };
 }
 
 export interface ReferenceStandard {
@@ -136,10 +163,16 @@ export interface ReferenceStandard {
   rangeMax: number;
   unit: Unit;
   resolution: number; 
+  
   valueModelType: CurveModel;
+  // Configuration for split models
+  valueSubModels?: { low: CurveModel, high: CurveModel }; 
   valueRegression?: RegressionResult;
+  
   uncertaintyModelType: CurveModel;
+  uncertaintySubModels?: { low: CurveModel, high: CurveModel };
   uncertaintyRegression?: RegressionResult;
+  
   calibrationPoints: StandardCalibrationPoint[];
   checkConfig?: StandardCheckConfig;
   intermediateChecks?: IntermediateCheck[]; 

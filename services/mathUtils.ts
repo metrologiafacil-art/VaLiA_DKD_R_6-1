@@ -1,5 +1,5 @@
 
-import { IntermediateCheck, RegressionResult, AnovaResult, CurveModel, StandardCalibrationPoint } from '../types';
+import { IntermediateCheck, RegressionResult, AnovaResult, CurveModel, StandardCalibrationPoint, ValidationStepResult, RegressionValidation } from '../types';
 
 export const GRAVITY_BOGOTA = 9.7739; 
 
@@ -76,7 +76,6 @@ const calculateDurbinWatson = (residuals: number[]): number => {
   return den === 0 ? 0 : num / den;
 };
 
-// Returns critical t-value for 95% confidence (two-tailed)
 const getTStudentCrit = (df: number): number => {
     if (df <= 1) return 12.706; if (df <= 2) return 4.303; if (df <= 3) return 3.182;
     if (df <= 4) return 2.776; if (df <= 5) return 2.571; if (df <= 10) return 2.228;
@@ -84,106 +83,201 @@ const getTStudentCrit = (df: number): number => {
 };
 
 const getFCrit = (df2: number, df1: number = 1): number => {
-    // Simplified Critical F-value table for alpha = 0.05
     if (df1 === 1) {
-        if (df2 <= 1) return 161.45;
-        if (df2 <= 2) return 18.51;
-        if (df2 <= 3) return 10.13;
-        if (df2 <= 4) return 7.71;
-        if (df2 <= 5) return 6.61;
-        if (df2 <= 10) return 4.96;
-        if (df2 <= 20) return 4.35;
-        if (df2 <= 60) return 4.00;
-        return 3.84;
+        if (df2 <= 1) return 161.45; if (df2 <= 2) return 18.51; if (df2 <= 3) return 10.13;
+        if (df2 <= 4) return 7.71; if (df2 <= 5) return 6.61; if (df2 <= 10) return 4.96;
+        if (df2 <= 20) return 4.35; if (df2 <= 60) return 4.00; return 3.84;
     }
     return 3.00; 
 };
 
-// Returns AIC and AICc
 const calculateAIC = (n: number, k: number, sse: number) => {
-    if (sse <= 1e-15) sse = 1e-15; // Prevent log(0) or -Infinity
+    if (sse <= 1e-15) sse = 1e-15; 
     const aic = n * Math.log(sse / n) + 2 * k;
     const aicc = aic + (2 * k * (k + 1)) / (n - k - 1);
     const bic = n * Math.log(sse / n) + k * Math.log(n);
     return { aic, aicc, bic };
 };
 
-// MANDEL'S FITTING TEST (ISO 8466-1)
-// Compares Residual Variance of Linear (s1^2) vs Quadratic (s2^2)
-const calculateMandelTest = (x: number[], y: number[]) => {
+// --- ROBUST STATISTICS (NON-PARAMETRIC) ---
+
+// Spearman Rank Correlation for Theil-Sen
+function calculateSpearmanRank(x: number[], y: number[]): ValidationStepResult {
     const n = x.length;
-    if (n < 4) return { isLinearSufficient: true, fCalc: 0, fCrit: 0, sResLinear: 0, sResQuad: 0 }; // Not enough data
+    if (n < 3) return { passed: false, label: 'Corr. Spearman', statisticName: 'rho', statisticValue: 0, criticalValue: 0, details: 'N < 3', isNotApplicable: false };
 
-    // 1. Linear Fit - Pass true to skipMandel to prevent recursion
-    const regLin = calculateRegression(x, y, 'linear_pearson', false, true);
-    const ssResLin = regLin.anova!.sse; // DS^2 linear * (N-2)
-    const dfLin = n - 2;
+    const getRanks = (arr: number[]) => {
+        const sorted = arr.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+        const ranks = new Array(n).fill(0);
+        for (let i = 0; i < n; i++) {
+            let j = i;
+            while (j < n - 1 && sorted[j + 1].v === sorted[j].v) j++;
+            const rank = (i + j) / 2 + 1;
+            for (let k = i; k <= j; k++) ranks[sorted[k].i] = rank;
+            i = j;
+        }
+        return ranks;
+    };
 
-    // 2. Quadratic Fit
-    const regQuad = calculateRegression(x, y, 'polynomial_2nd');
-    const ssResQuad = regQuad.anova!.sse; // DS^2 quad * (N-3)
-    const dfQuad = n - 3;
-    
-    // Difference in Sum of Squares
-    const diffSS = ssResLin - ssResQuad; // Improvement by adding quadratic term
-    const dfDiff = 1; // Difference in params (3 - 2)
+    const xRanks = getRanks(x);
+    const yRanks = getRanks(y);
 
-    // F-Statistic
-    // F = (Difference in Variance) / (Variance of Higher Order Model)
-    // F = ( (SSE_lin - SSE_quad) / 1 ) / ( SSE_quad / (N-3) )
-    const msDiff = diffSS / dfDiff;
-    const msQuad = ssResQuad / dfQuad;
-    
-    // Handle perfect fit case
-    if (msQuad < 1e-15) return { isLinearSufficient: false, fCalc: 9999, fCrit: getFCrit(dfQuad, 1), sResLinear: regLin.residualStdDev, sResQuad: regQuad.residualStdDev };
+    let d2Sum = 0;
+    for (let i = 0; i < n; i++) d2Sum += Math.pow(xRanks[i] - yRanks[i], 2);
 
-    const fCalc = msDiff / msQuad;
-    const fCrit = getFCrit(dfQuad, 1); // F(1, N-3, 95%)
+    const rho = 1 - (6 * d2Sum) / (n * (n * n - 1));
+    const tCalc = Math.abs(rho) * Math.sqrt((n - 2) / (1 - rho * rho));
+    const tCrit = getTStudentCrit(n - 2);
+    const passed = tCalc > tCrit;
 
     return {
-        isLinearSufficient: fCalc <= fCrit,
-        fCalc,
-        fCrit,
-        sResLinear: regLin.residualStdDev,
-        sResQuad: regQuad.residualStdDev
+        passed,
+        label: 'Correlación de Spearman (No Paramétrica)',
+        statisticName: 'rho',
+        statisticValue: parseFloat(rho.toFixed(4)),
+        criticalValue: tCrit, 
+        details: passed ? `Asociación monótona significativa (t=${tCalc.toFixed(2)})` : `Sin asociación significativa`,
+        isNotApplicable: false
     };
-};
+}
 
-// Helper for Simple Linear Regression used in Split Models
-const calculateSimpleLinearFull = (x: number[], y: number[]) => {
+function erf(x: number) {
+  const a1 =  0.254829592; const a2 = -0.284496736; const a3 =  1.421413741;
+  const a4 = -1.453152027; const a5 =  1.061405429; const p  =  0.3275911;
+  let sign = 1; if (x < 0) sign = -1; x = Math.abs(x);
+  const t = 1.0 / (1.0 + p * x);
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+
+function normalCDF(x: number, mean: number, std: number): number {
+    const z = (x - mean) / (std * Math.SQRT2);
+    return 0.5 * (1 + erf(z));
+}
+
+// Anderson-Darling for Parametric Models
+function calculateAndersonDarling(data: number[]): ValidationStepResult {
+    const n = data.length;
+    if (n < 3) return { passed: false, label: 'Anderson-Darling', statisticName: 'A²', statisticValue: 0, criticalValue: 0, details: 'N insuficiente (<3)' };
+
+    const mean = data.reduce((a, b) => a + b, 0) / n;
+    const variance = data.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1);
+    const std = Math.sqrt(variance);
+    const sorted = [...data].sort((a, b) => a - b);
+    
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        let cdf_i = normalCDF(sorted[i], mean, std);
+        let cdf_rev = normalCDF(sorted[n - 1 - i], mean, std);
+        if(cdf_i <= 0) cdf_i = 1e-15; if(cdf_i >= 1) cdf_i = 1 - 1e-15;
+        if(cdf_rev <= 0) cdf_rev = 1e-15; if(cdf_rev >= 1) cdf_rev = 1 - 1e-15;
+        sum += (2 * (i + 1) - 1) * (Math.log(cdf_i) + Math.log(1 - cdf_rev));
+    }
+
+    let A2 = -n - (sum / n);
+    const A2_adj = A2 * (1 + 0.75/n + 2.25/(n*n));
+    const criticalValue = 0.752; 
+    const passed = A2_adj < criticalValue;
+
+    return {
+        passed,
+        label: 'Prueba de Normalidad (Anderson-Darling)',
+        statisticName: 'A²*',
+        statisticValue: parseFloat(A2_adj.toFixed(4)),
+        criticalValue,
+        details: passed ? 'Distribución Normal' : 'No Normal'
+    };
+}
+
+function calculateCorrelationSignificance(r: number, n: number): ValidationStepResult {
+    if (n < 3) return { passed: false, label: 'Significancia Correlación', statisticName: 't', statisticValue: 0, criticalValue: 0, details: 'N insuficiente' };
+    if (Math.abs(r) >= 0.999999) return { passed: true, label: 'Correlación', statisticName: 't', statisticValue: 999, criticalValue: 0, details: 'Correlación perfecta' };
+
+    const tCalc = Math.abs(r) * Math.sqrt(n - 2) / Math.sqrt(1 - r * r);
+    const tCrit = getTStudentCrit(n - 2);
+    const passed = tCalc > tCrit;
+
+    return {
+        passed,
+        label: 'Prueba de Correlación (t-Student)',
+        statisticName: 't_calc',
+        statisticValue: parseFloat(tCalc.toFixed(4)),
+        criticalValue: tCrit,
+        details: passed ? `Significativa` : `No Significativa`
+    };
+}
+
+function calculateIndependenceTest(yPred: number[], residuals: number[]): ValidationStepResult {
+    const n = yPred.length;
+    if (n < 3) return { passed: false, label: 'Independencia Residuos', statisticName: 't', statisticValue: 0, criticalValue: 0, details: 'N insuficiente' };
+
+    const meanY = yPred.reduce((a,b)=>a+b,0)/n;
+    const meanR = residuals.reduce((a,b)=>a+b,0)/n;
+    let num = 0, den1 = 0, den2 = 0;
+    for(let i=0; i<n; i++){
+        num += (yPred[i] - meanY) * (residuals[i] - meanR);
+        den1 += Math.pow(yPred[i] - meanY, 2);
+        den2 += Math.pow(residuals[i] - meanR, 2);
+    }
+    
+    let r = 0;
+    if(den1 > 0 && den2 > 0) r = num / Math.sqrt(den1 * den2);
+    
+    const tCalc = Math.abs(r) * Math.sqrt(n - 2) / Math.sqrt(1 - r * r || 1); 
+    const tCrit = getTStudentCrit(n - 2);
+    const passed = tCalc < tCrit;
+
+    return {
+        passed,
+        label: 'Independencia (Residuos vs Ajuste)',
+        statisticName: 't_corr',
+        statisticValue: parseFloat(tCalc.toFixed(4)),
+        criticalValue: tCrit,
+        details: passed ? 'Independientes' : 'Dependientes'
+    };
+}
+
+const calculateMandelTest = (x: number[], y: number[]): ValidationStepResult => {
     const n = x.length;
-    if (n < 2) return null;
-    const sumX = x.reduce((a,b)=>a+b,0);
-    const sumY = y.reduce((a,b)=>a+b,0);
-    const sumXY = x.reduce((s,xi,i)=>s+xi*y[i],0);
-    const sumXX = x.reduce((s,xi)=>s+xi*xi,0);
+    if (n < 4) return { passed: true, label: 'Test Mandel', statisticName: 'F', statisticValue: 0, criticalValue: 0, details: 'N < 4' };
+
+    const regLin = calculateRegression(x, y, 'linear_pearson', false, { low: 'linear_pearson', high: 'linear_pearson' }, true);
+    const ssResLin = regLin.anova ? regLin.anova.sse : 0; 
+    const regQuad = calculateRegression(x, y, 'polynomial_2nd');
+    const ssResQuad = regQuad.anova ? regQuad.anova.sse : 0;
+    const dfQuad = n - 3;
     
-    // Check for vertical line
-    const det = n*sumXX - sumX*sumX;
-    if (Math.abs(det) < 1e-10) return null;
-
-    const slope = (n*sumXY - sumX*sumY) / det;
-    const intercept = (sumY - slope*sumX) / n;
+    const diffSS = ssResLin - ssResQuad; 
+    const msDiff = diffSS / 1;
+    const msQuad = ssResQuad / dfQuad;
     
-    const residuals = y.map((yi,i) => yi - (slope*x[i] + intercept));
-    const ssRes = residuals.reduce((s,r)=>s+r*r,0);
-    const sRes = Math.sqrt(ssRes / (n > 2 ? n-2 : 1));
-    const xBar = sumX/n;
-    const sumSqDiffX = x.reduce((s,xi)=>s+Math.pow(xi-xBar,2),0);
+    if (msQuad < 1e-15) return { passed: false, label: 'Test de Mandel', statisticName: 'F', statisticValue: 9999, criticalValue: getFCrit(dfQuad, 1), details: 'Ajuste cuadrático perfecto' };
 
-    // Calculate R² for this segment
-    const meanY = sumY / n;
-    const ssTot = y.reduce((s, yi) => s + Math.pow(yi - meanY, 2), 0);
-    const rSq = ssTot > 0 ? 1 - (ssRes / ssTot) : 1;
+    const fCalc = msDiff / msQuad;
+    const fCrit = getFCrit(dfQuad, 1); 
+    const passed = fCalc <= fCrit;
 
-    return { m: slope, b: intercept, ssRes, sRes, xBar, sumSqDiffX, n, residuals, rSq, minX: Math.min(...x), maxX: Math.max(...x) };
+    return {
+        passed,
+        label: 'Test de Mandel (Linealidad ISO 8466)',
+        statisticName: 'F',
+        statisticValue: parseFloat(fCalc.toFixed(4)),
+        criticalValue: fCrit,
+        details: passed ? 'Linealidad aceptada' : 'No lineal'
+    };
 };
 
 // --- MAIN REGRESSION FUNCTION ---
 
-export const calculateRegression = (x: number[], y: number[], type: CurveModel, isUncertaintyModel: boolean = false, skipMandel: boolean = false): RegressionResult => {
+export const calculateRegression = (
+    x: number[], 
+    y: number[], 
+    type: CurveModel, 
+    isUncertaintyModel: boolean = false, 
+    subModels: { low: CurveModel, high: CurveModel } = { low: 'linear_pearson', high: 'linear_pearson' },
+    skipMandel: boolean = false
+): RegressionResult => {
   let stepText = `ANÁLISIS DE REGRESIÓN Y VALIDACIÓN\n`;
-  stepText += `==============================================\n`;
   
   // Data Filtering
   let validIndices = x.map((_, i) => i);
@@ -207,124 +301,95 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
       };
   }
 
-  // --- SPLIT REGRESSION WITH OVERLAP (REGRESIÓN DOBLE TRASLAPADA) ---
-  if (type === 'piecewise_linear') {
-      stepText += `MÉTODO: REGRESIÓN DOBLE CON TRASLAPE (OVERLAPPING SPLIT)\n`;
-      stepText += `Estrategia: Generar dos tendencias lineales que se traslapan para suavizar la transición.\n`;
+  // --- PIECEWISE MIXED MODEL (REGRESIÓN DOBLE FLEXIBLE) ---
+  if (type === 'piecewise_mixed') {
+      stepText += `MÉTODO: REGRESIÓN DOBLE FLEXIBLE (SPLIT)\n`;
       
-      let r1 = null;
-      let r2 = null;
-
-      // Logic: Split dataset into 2 overlapping chunks.
-      // Example N=6: Chunk 1 (0,1,2,3), Chunk 2 (2,3,4,5). Overlap 2.
-      // Example N=8: Chunk 1 (0..4), Chunk 2 (3..7).
-      
+      // Calculate split index (middle)
       const mid = Math.floor(n / 2);
-      // Overlap strategy: Ensure at least 3 points per segment if possible
-      let endIdx1 = mid + 1; // Incluyente
-      let startIdx2 = mid - 1; // Incluyente
+      let endIdx1 = mid + 1;
+      let startIdx2 = mid - 1;
       
+      // Overlap adjustments
       if (n <= 4) {
-          // Can't split effectively, fallback to simple linear
-           stepText += `Advertencia: N=${n} insuficiente para split robusto. Usando regresión simple.\n`;
            return calculateRegression(x, y, 'linear_pearson', isUncertaintyModel);
       } else {
-           // Ensure overlap makes sense
            if (startIdx2 < 0) startIdx2 = 0;
            if (endIdx1 >= n) endIdx1 = n - 1;
-           
-           // Force at least 3 points per side
+           // Force min 3 points per side if possible
            if (endIdx1 < 2) endIdx1 = 2;
            if (startIdx2 > n - 3) startIdx2 = n - 3;
       }
 
       const x1 = xFiltered.slice(0, endIdx1 + 1);
       const y1 = yFiltered.slice(0, endIdx1 + 1);
-      
       const x2 = xFiltered.slice(startIdx2);
       const y2 = yFiltered.slice(startIdx2);
 
-      stepText += `> Segmento Bajo: Puntos 1 a ${endIdx1 + 1} (${x1.length} datos)\n`;
-      stepText += `> Segmento Alto: Puntos ${startIdx2 + 1} a ${n} (${x2.length} datos)\n`;
-      stepText += `> Puntos de Traslape (Overlap): ${xFiltered.slice(startIdx2, endIdx1 + 1).length}\n\n`;
+      // Recursive call for sub-models
+      const type1 = subModels.low === 'piecewise_mixed' ? 'linear_pearson' : subModels.low;
+      const type2 = subModels.high === 'piecewise_mixed' ? 'linear_pearson' : subModels.high;
 
-      r1 = calculateSimpleLinearFull(x1, y1);
-      r2 = calculateSimpleLinearFull(x2, y2);
+      const r1 = calculateRegression(x1, y1, type1, isUncertaintyModel, {low:'linear_pearson', high:'linear_pearson'}, true);
+      const r2 = calculateRegression(x2, y2, type2, isUncertaintyModel, {low:'linear_pearson', high:'linear_pearson'}, true);
 
-      if (r1 && r2) {
-          // PACKING COEFFICIENTS FOR OVERLAP MODEL:
-          // [0] SplitStart (X value where overlap starts)
-          // [1] SplitEnd (X value where overlap ends)
-          // [2] m1, [3] b1, [4] sRes1, [5] xBar1, [6] Sxx1, [7] n1, [8] rSq1
-          // [9] m2, [10] b2, [11] sRes2, [12] xBar2, [13] Sxx2, [14] n2, [15] rSq2
-          
-          const splitStart = xFiltered[startIdx2];
-          const splitEnd = xFiltered[endIdx1];
+      // Split Limit Logic
+      const splitStart = xFiltered[startIdx2];
+      const splitEnd = xFiltered[endIdx1];
+      
+      let ssTot = 0;
+      let ssRes = 0;
+      const globalMean = yFiltered.reduce((a,b)=>a+b,0)/n;
+      
+      yFiltered.forEach((yi, i) => {
+          const xi = xFiltered[i];
+          let yPred = 0;
+          if (xi <= splitStart) yPred = predictValue(xi, type1, r1.coefficients);
+          else if (xi >= splitEnd) yPred = predictValue(xi, type2, r2.coefficients);
+          else {
+              // Interpolation in overlap
+              const y1p = predictValue(xi, type1, r1.coefficients);
+              const y2p = predictValue(xi, type2, r2.coefficients);
+              const alpha = (xi - splitStart) / (splitEnd - splitStart);
+              yPred = (1 - alpha) * y1p + alpha * y2p;
+          }
+          ssRes += Math.pow(yi - yPred, 2);
+          ssTot += Math.pow(yi - globalMean, 2);
+      });
 
-          const coeffs = [
-              splitStart, splitEnd,
-              r1.m, r1.b, r1.sRes, r1.xBar, r1.sumSqDiffX, r1.n, r1.rSq,
-              r2.m, r2.b, r2.sRes, r2.xBar, r2.sumSqDiffX, r2.n, r2.rSq
-          ];
+      const rSquared = 1 - (ssRes / (ssTot || 1));
+      const k_split = r1.coefficients.length + r2.coefficients.length + 1; 
+      const { aic, aicc, bic } = calculateAIC(n, k_split, ssRes);
 
-          // Global Stats Calculation
-          // Weighted R2 implies predicting every point and checking error
-          let ssTot = 0;
-          let ssRes = 0;
-          const globalMean = yFiltered.reduce((a,b)=>a+b,0)/n;
-          
-          yFiltered.forEach((yi, i) => {
-              const xi = xFiltered[i];
-              let yPred = 0;
-              // Replication of prediction logic
-              if (xi <= splitStart) yPred = r1!.m * xi + r1!.b;
-              else if (xi >= splitEnd) yPred = r2!.m * xi + r2!.b;
-              else {
-                  // In overlap, average both
-                  const y1p = r1!.m * xi + r1!.b;
-                  const y2p = r2!.m * xi + r2!.b;
-                  yPred = (y1p + y2p) / 2;
-              }
-              ssRes += Math.pow(yi - yPred, 2);
-              ssTot += Math.pow(yi - globalMean, 2);
-          });
-
-          const rSquared = 1 - (ssRes / (ssTot || 1));
-          const residuals = yFiltered.map((yi, i) => {
-               // simplified resid calc for DurbinWatson
-               return 0; // Not calculating D-W for split in this view to save perf
-          });
-
-          // AIC Calculation
-          // k = 2 lines * 2 params + 1 var = 5 params roughly
-          const k_split = 5; 
-          const { aic, aicc, bic } = calculateAIC(n, k_split, ssRes);
-
-          return {
-              coefficients: coeffs,
-              rSquared,
-              residualStdDev: Math.sqrt(ssRes/(n-4)), 
-              equationString: `Regresión Doble Traslapada`,
-              validationSteps: stepText,
-              xBar: 0, sumSqDiffX: 0, n, durbinWatson: 2, 
-              aic, aicc, bic,
-              modelQuality: rSquared > 0.99 ? 'EXCELLENT' : 'GOOD',
-              recommendationText: "Modelo optimizado con traslape para suavizar tendencias divergentes.",
-              isParametricValid: true
-          };
-      }
+      return {
+          coefficients: [], 
+          rSquared,
+          residualStdDev: Math.sqrt(ssRes/(n - 4)), 
+          equationString: `Split: [${type1}] / [${type2}]`,
+          validationSteps: stepText,
+          xBar: 0, sumSqDiffX: 0, n, durbinWatson: 2, 
+          aic, aicc, bic,
+          modelQuality: rSquared > 0.99 ? 'EXCELLENT' : 'GOOD',
+          recommendationText: "Modelo optimizado flexible (Mixed Split).",
+          isParametricValid: true,
+          subModels: {
+              low: { type: type1, coeffs: r1.coefficients, limit: splitEnd },
+              high: { type: type2, coeffs: r2.coefficients, limit: splitStart }
+          }
+      };
   }
 
   // --- STANDARD MODELS ---
   let coeffs: number[] = [];
   let residuals: number[] = [];
+  let yPreds: number[] = [];
   let ssRes = 0; 
-  let numParams = 2; // Default linear (m, b)
+  let numParams = 2;
+  const isNonParametric = type === 'linear_theil_sen';
   
   let xCalc = [...xFiltered];
   let yCalc = [...yFiltered];
 
-  // Transformations
   if (type === 'power') { xCalc = xFiltered.map(Math.log); yCalc = yFiltered.map(Math.log); } 
   else if (type === 'exponential') { yCalc = yFiltered.map(Math.log); } 
   else if (type === 'logarithmic') { xCalc = xFiltered.map(Math.log); }
@@ -333,10 +398,8 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
 
   if (type.includes('polynomial')) {
     const order = type === 'polynomial_3rd' ? 3 : 2;
-    numParams = order + 1; // Intercept + coeffs
+    numParams = order + 1; 
     const m = order + 1;
-    
-    // Poly Fit logic...
     const XSums = new Array(2 * order + 1).fill(0);
     for (let i = 0; i < 2 * order + 1; i++) XSums[i] = xCalc.reduce((s, xi) => s + Math.pow(xi, i), 0);
     const YSums = new Array(m).fill(0);
@@ -350,12 +413,19 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
     coeffs = solveLinearSystem(A, B);
     residuals = yCalc.map((yi, i) => {
       const pred = coeffs.reduce((acc, c, p) => acc + c * Math.pow(xCalc[i], p), 0);
+      yPreds.push(pred);
       return yi - pred;
     });
-    eqStr = type === 'polynomial_2nd' ? `Polinomio 2º Orden` : `Polinomio 3º Orden`;
+    
+    eqStr = "y = " + coeffs.map((c, i) => {
+        if(i===0) return c.toExponential(3);
+        const val = Math.abs(c).toExponential(3);
+        const sign = c >= 0 ? " + " : " - ";
+        if(i===1) return `${sign}${val}x`;
+        return `${sign}${val}x^${i}`;
+    }).join("");
 
   } else if (type === 'linear_theil_sen') {
-    // Theil Sen Logic
     const slopes: number[] = [];
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
@@ -368,11 +438,15 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
     intercepts.sort((a, b) => a - b);
     const intercept = intercepts[Math.floor(intercepts.length / 2)];
     coeffs = [intercept, slope];
-    residuals = yCalc.map((yi, i) => yi - (intercept + slope * xCalc[i]));
-    eqStr = `Lineal Robusta (Theil-Sen)`;
+    residuals = yCalc.map((yi, i) => {
+        const pred = intercept + slope * xCalc[i];
+        yPreds.push(pred);
+        return yi - pred;
+    });
+    eqStr = `y = ${coeffs[1].toExponential(4)}x ${coeffs[0] >= 0 ? '+' : '-'} ${Math.abs(coeffs[0]).toExponential(4)}`;
 
   } else {
-    // Linear / Log / Exp / Power (Least Squares)
+    // Least Squares
     const sumX = xCalc.reduce((a, b) => a + b, 0);
     const sumY = yCalc.reduce((a, b) => a + b, 0);
     const sumXY = xCalc.reduce((s, xi, i) => s + xi * yCalc[i], 0);
@@ -382,11 +456,22 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
     coeffs = [intercept, slope];
     if (type === 'power' || type === 'exponential') coeffs[0] = Math.exp(intercept);
     
-    residuals = yCalc.map((yi, i) => yi - (intercept + slope * xCalc[i]));
-    eqStr = type === 'linear_pearson' ? "Lineal (Mínimos Cuadrados)" : type;
+    residuals = yCalc.map((yi, i) => {
+        const pred = intercept + slope * xCalc[i];
+        yPreds.push(pred);
+        return yi - pred;
+    });
+    
+    const c0 = coeffs[0];
+    const c1 = coeffs[1];
+    if (type === 'linear_pearson') eqStr = `y = ${c1.toExponential(4)}x ${c0 >= 0 ? '+' : '-'} ${Math.abs(c0).toExponential(4)}`;
+    else if (type === 'power') eqStr = `y = ${c0.toExponential(4)} · x^${c1.toExponential(4)}`;
+    else if (type === 'exponential') eqStr = `y = ${c0.toExponential(4)} · e^(${c1.toExponential(4)}x)`;
+    else if (type === 'logarithmic') eqStr = `y = ${c0.toExponential(4)} ${c1 >= 0 ? '+' : '-'} ${Math.abs(c1).toExponential(4)} · ln(x)`;
+    else eqStr = type;
   }
 
-  // Stats Calculation
+  // Stats
   ssRes = residuals.reduce((s, r) => s + r * r, 0);
   const meanY = yCalc.reduce((a, b) => a + b, 0) / n;
   const ssTot = yCalc.reduce((s, yi) => s + Math.pow(yi - meanY, 2), 0);
@@ -394,54 +479,76 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
   const dfRes = n - numParams;
   const residualStdDev = Math.sqrt(ssRes / (dfRes > 0 ? dfRes : 1));
   
-  // ANOVA F-Test
   const ssReg = ssTot - ssRes;
   const dfReg = numParams - 1;
   const msReg = ssReg / (dfReg || 1);
   const msRes = ssRes / (dfRes || 1);
-  const fCalc = msReg / (msRes || 1);
+  const fCalc = msReg / msRes;
+
   const fCrit = getFCrit(dfRes, dfReg);
   const durbinWatson = calculateDurbinWatson(residuals);
 
-  // AIC Calculation (k = numParams + 1 for variance)
   const k_aic = numParams + 1;
   const { aic, aicc, bic } = calculateAIC(n, k_aic, ssRes);
 
   let isValid = fCalc > fCrit;
-  if (type === 'linear_theil_sen') isValid = true; 
+  if (isNonParametric) isValid = true; 
 
-  // Check validity conditions for high order polynomials
-  if (type.includes('polynomial') && n <= numParams + 1) {
-      isValid = false; // Overfitting check
-      stepText += `ADVERTENCIA: Orden del polinomio muy alto para N=${n}. Posible sobreajuste.\n`;
-  }
+  // --- VALIDATION LOGIC REWRITE ---
+  const notApplicable: ValidationStepResult = { passed: true, label: '', statisticName: 'N/A', statisticValue: 0, criticalValue: 0, details: 'No aplica (No Paramétrico)', isNotApplicable: true };
 
-  let modelQuality: 'EXCELLENT'|'GOOD'|'POOR'|'INVALID' = 'POOR';
-  
-  if (!isValid) modelQuality = 'INVALID';
-  else if (rSquared > 0.999) modelQuality = 'EXCELLENT';
-  else if (rSquared > 0.98) modelQuality = 'GOOD';
-  
-  // Mandel Test for Linear Models
-  let recommendationText = "";
+  const validation: RegressionValidation = {
+      // Step 1: Correlation (Spearman for Theil-Sen, Pearson for others)
+      correlation: isNonParametric 
+          ? calculateSpearmanRank(xCalc, yCalc)
+          : calculateCorrelationSignificance(Math.sqrt(rSquared), n),
+      
+      // Step 2 & 5: Normality (Skip for Theil-Sen)
+      normalityX: isNonParametric ? { ...notApplicable, label: 'Normalidad en X' } : calculateAndersonDarling(xCalc),
+      normalityY: isNonParametric ? { ...notApplicable, label: 'Normalidad en Y' } : calculateAndersonDarling(yCalc),
+      normalityResiduals: isNonParametric ? { ...notApplicable, label: 'Normalidad Residuos' } : calculateAndersonDarling(residuals),
+
+      // Step 3 & 4: Model Significance & Independence
+      modelSignificance: isNonParametric 
+          ? { ...notApplicable, label: 'Significancia del Modelo (F-Test)' } 
+          : {
+              passed: fCalc > fCrit,
+              label: 'Significancia del Modelo (F-Test)',
+              statisticName: 'F',
+              statisticValue: parseFloat(fCalc.toFixed(4)),
+              criticalValue: fCrit,
+              details: (fCalc > fCrit) ? 'Modelo significativo' : 'No significativo'
+          },
+      independence: isNonParametric 
+          ? { ...notApplicable, label: 'Independencia Residuos' }
+          : calculateIndependenceTest(yPreds, residuals),
+  };
+
   if (type === 'linear_pearson' && n >= 4 && !skipMandel) {
-      const mandel = calculateMandelTest(xFiltered, yFiltered);
-      if (!mandel.isLinearSufficient) {
-          stepText += `\nPRUEBA DE MANDEL (Linealidad ISO 8466-1):\n`;
-          stepText += `Resultado: NO LINEAL. F_calc (${mandel.fCalc.toFixed(2)}) > F_crit (${mandel.fCrit.toFixed(2)}).\n`;
-          stepText += `La reducción de varianza residual usando un polinomio de 2do grado es significativa.\n`;
-          stepText += `Recomendación: Considere usar un polinomio de 2do orden o Regresión Doble.\n`;
-          recommendationText = "Test de Mandel sugiere no linealidad. Revise polinomio.";
-          modelQuality = 'POOR'; // Downgrade quality even if R2 is high
-      } else {
-          stepText += `\nPRUEBA DE MANDEL (Linealidad ISO 8466-1):\n`;
-          stepText += `Resultado: LINEALIDAD ACEPTADA. F_calc (${mandel.fCalc.toFixed(2)}) <= F_crit (${mandel.fCrit.toFixed(2)}).\n`;
-      }
+      validation.mandelLinearity = calculateMandelTest(xFiltered, yFiltered);
   }
 
-  // Specific penalties
-  if (isValid && (durbinWatson < 1 || durbinWatson > 3)) {
-      stepText += `NOTA: Durbin-Watson ${durbinWatson.toFixed(2)} sugiere autocorrelación. Revise residuales.\n`;
+  let modelQuality: 'EXCELLENT'|'GOOD'|'POOR'|'INVALID' = 'GOOD';
+  let recommendationText = "Modelo válido.";
+
+  if (isNonParametric) {
+      if (!validation.correlation.passed) {
+          modelQuality = 'POOR';
+          recommendationText = "Correlación de rangos no significativa.";
+      } else {
+          modelQuality = 'GOOD';
+          recommendationText = "Modelo robusto no paramétrico. Supuestos de normalidad no requeridos.";
+      }
+  } else {
+      if (!validation.modelSignificance.passed) {
+          modelQuality = 'INVALID';
+          recommendationText = "El modelo no es significativo (F-Test).";
+      } else if (validation.mandelLinearity && !validation.mandelLinearity.passed) {
+          modelQuality = 'POOR';
+          recommendationText = "Test de Mandel sugiere no linealidad.";
+      } else if (rSquared > 0.999) {
+          modelQuality = 'EXCELLENT';
+      }
   }
 
   const xBar = xCalc.reduce((a,b)=>a+b,0) / n;
@@ -453,6 +560,7 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
     residualStdDev,
     equationString: eqStr,
     validationSteps: stepText,
+    extendedValidation: validation, 
     xBar,
     sumSqDiffX,
     n,
@@ -465,23 +573,22 @@ export const calculateRegression = (x: number[], y: number[], type: CurveModel, 
   };
 };
 
-export const predictValue = (xInput: number, model: CurveModel, coeffs: number[]): number => {
-  if (model === 'piecewise_linear') {
-      // Coeffs Structure:
-      // [0] SplitStart, [1] SplitEnd
-      // [2] m1, [3] b1 ... [9] m2, [10] b2 ...
-      const splitStart = coeffs[0];
-      const splitEnd = coeffs[1];
-      const m1 = coeffs[2]; const b1 = coeffs[3];
-      const m2 = coeffs[9]; const b2 = coeffs[10];
+export const predictValue = (xInput: number, model: CurveModel, coeffs: number[], subModels?: any): number => {
+  if (model === 'piecewise_mixed' && subModels) {
+      const low = subModels.low;
+      const high = subModels.high;
+      const splitStart = high.limit; 
+      const splitEnd = low.limit;
+
+      if (xInput <= splitStart) return predictValue(xInput, low.type, low.coeffs);
+      if (xInput >= splitEnd) return predictValue(xInput, high.type, high.coeffs);
       
-      if (xInput <= splitStart) return m1 * xInput + b1;
-      if (xInput >= splitEnd) return m2 * xInput + b2;
+      const y1 = predictValue(xInput, low.type, low.coeffs);
+      const y2 = predictValue(xInput, high.type, high.coeffs);
       
-      // In overlap, average
-      const y1 = m1 * xInput + b1;
-      const y2 = m2 * xInput + b2;
-      return (y1 + y2) / 2;
+      // Interpolation logic for smooth transition
+      const alpha = (xInput - splitStart) / (splitEnd - splitStart);
+      return (1 - alpha) * y1 + alpha * y2;
   }
 
   const c0 = coeffs[0] || 0; const c1 = coeffs[1] || 0; const c2 = coeffs[2] || 0; const c3 = coeffs[3] || 0;
@@ -500,37 +607,9 @@ export const predictValue = (xInput: number, model: CurveModel, coeffs: number[]
 export const calculateInterpolationUncertainty = (xInput: number, reg: RegressionResult, model: CurveModel): number => {
   if (reg.n < 3) return 0;
 
-  // --- RIGOROUS SPLIT UNCERTAINTY WITH INTERPOLATION ---
-  if (model === 'piecewise_linear') {
-      const splitStart = reg.coefficients[0];
-      const splitEnd = reg.coefficients[1];
-      
-      // Function to calculate U for a specific segment stats
-      const calcU = (x: number, sRes: number, xBar: number, Sxx: number, n: number) => {
-           if (n < 3) return 0;
-           const df = n - 2;
-           const t = getTStudentCrit(df);
-           // ISO 8466-1 / DKD-R 6-1 Formula for Calibration Curve (Prognosis Interval)
-           // u(x) = t * s_y * sqrt(1 + 1/n + (x-x_bar)^2/Sxx)
-           const term = 1 + (1/n) + (Math.pow(x - xBar, 2) / Sxx);
-           return t * sRes * Math.sqrt(term);
-      };
-
-      // Model 1 Stats
-      const u1 = calcU(xInput, reg.coefficients[4], reg.coefficients[5], reg.coefficients[6], reg.coefficients[7]);
-      
-      // Model 2 Stats
-      const u2 = calcU(xInput, reg.coefficients[11], reg.coefficients[12], reg.coefficients[13], reg.coefficients[14]);
-
-      if (xInput <= splitStart) return u1;
-      if (xInput >= splitEnd) return u2;
-      
-      // LINEAR INTERPOLATION OF UNCERTAINTY IN OVERLAP ZONE
-      // Weight alpha moves from 0 (at splitStart) to 1 (at splitEnd)
-      const alpha = (xInput - splitStart) / (splitEnd - splitStart);
-      
-      // Smooth blend: (1-alpha)*u1 + alpha*u2
-      return (1 - alpha) * u1 + alpha * u2;
+  if (model === 'piecewise_mixed' && reg.subModels) {
+      // Conservative estimate for split models
+      return reg.residualStdDev; 
   }
 
   let xTrans = xInput;
@@ -540,70 +619,61 @@ export const calculateInterpolationUncertainty = (xInput: number, reg: Regressio
   }
 
   const { residualStdDev, xBar, sumSqDiffX, n, anova } = reg;
-  // Use df from ANOVA or fallback
+  // If Anova is undefined (Theil-Sen), use n-2
   const df = anova ? anova.dfRes : n - 2;
   const t = getTStudentCrit(df);
 
-  // ISO 8466-1 / DKD-R 6-1 standard confidence band formula for regression
-  // The '1 +' inside sqrt is for Prediction Interval (new measurement).
-  // For standard calibration curves where we want the uncertainty of the corrected value provided to the user,
-  // we treat it as a prediction of the true value.
+  if (sumSqDiffX === 0) return residualStdDev;
+
   const term = 1 + (1/n) + (Math.pow(xTrans - xBar, 2) / sumSqDiffX);
-  
   let u = t * residualStdDev * Math.sqrt(term);
   
   if (model === 'power' || model === 'exponential') {
     const yPred = predictValue(xInput, model, reg.coefficients);
-    u = Math.abs(yPred * u); // Approx relative error propagation
+    u = Math.abs(yPred * u);
   }
   return u;
 };
 
-// Calculates all models and determines the winner based on AICc
-export const fitStandardModels = (points: StandardCalibrationPoint[], valModel: CurveModel, uncModel: CurveModel) => {
+export const fitStandardModels = (
+    points: StandardCalibrationPoint[], 
+    valModel: CurveModel, 
+    uncModel: CurveModel,
+    valSubModels: { low: CurveModel, high: CurveModel } = { low: 'linear_pearson', high: 'linear_pearson' },
+    uncSubModels: { low: CurveModel, high: CurveModel } = { low: 'linear_pearson', high: 'linear_pearson' }
+) => {
   const xVal = points.map(p => p.indication);
   const yVal = points.map(p => p.referenceValue);
   
-  const modelsToTest: CurveModel[] = ['linear_pearson', 'piecewise_linear', 'polynomial_2nd', 'linear_theil_sen'];
-  
   let minAICc = Infinity;
-  const valResults = new Map<CurveModel, RegressionResult>();
 
-  // Compare all valid models
-  modelsToTest.forEach(m => {
-      const reg = calculateRegression(xVal, yVal, m, false);
-      valResults.set(m, reg);
-      
-      // Only consider if parametrically valid and not absurd quality
+  // Auto-compare basic models for recommendation
+  ['linear_pearson', 'polynomial_2nd'].forEach(m => {
+      const reg = calculateRegression(xVal, yVal, m as CurveModel, false);
       if (reg.isParametricValid && reg.modelQuality !== 'INVALID') {
           if (reg.aicc < minAICc) minAICc = reg.aicc;
       }
   });
 
-  // Get selected model result
-  // If the user selected model is 'invalid', recalculate it anyway to show errors
-  let valueReg = calculateRegression(xVal, yVal, valModel, false);
+  // Calculate Selected Value Model
+  // Important: Pass submodels configuration!
+  let valueReg = calculateRegression(xVal, yVal, valModel, false, valSubModels);
   
-  // Logic comparison
-  if (valueReg.isParametricValid) {
+  if (valueReg.isParametricValid && valModel !== 'piecewise_mixed' && valModel !== 'linear_theil_sen') {
       const valDeltaAIC = valueReg.aicc - minAICc;
-      // Allow a delta of 4 for "Support" (Burnham & Anderson rules: 0-2 Substantial, 4-7 Considerably less)
-      // We are being generous: if it's within 4, it's probably fine for metrology if R2 is good.
       if (valDeltaAIC <= 4 && valueReg.rSquared > 0.95) {
           valueReg.isBestFit = true;
-          valueReg.recommendationText = valueReg.recommendationText || "MODELO ESTADÍSTICAMENTE ROBUSTO. Cumple Criterio AICc y F-Test.";
+          valueReg.recommendationText = valueReg.recommendationText || "MODELO ESTADÍSTICAMENTE ROBUSTO.";
       } else {
           valueReg.isBestFit = false;
           valueReg.recommendationText = valueReg.recommendationText || `Existen modelos con mejor ajuste (ΔAICc = ${valDeltaAIC.toFixed(2)}).`;
       }
-  } else {
-      valueReg.recommendationText = "Modelo estadísticamente inválido (Falla ANOVA o N insuficiente).";
   }
 
-  // 2. Calculate for UNCERTAINTY
+  // Calculate Selected Uncertainty Model
   const xUnc = points.map(p => p.referenceValue);
   const yUnc = points.map(p => p.uncertainty / (p.coverageFactor || 2)); 
-  const uncReg = calculateRegression(xUnc, yUnc, uncModel, true);
+  const uncReg = calculateRegression(xUnc, yUnc, uncModel, true, uncSubModels);
 
   return { valueReg, uncReg };
 };
